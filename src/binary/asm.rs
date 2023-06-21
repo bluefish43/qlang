@@ -1,6 +1,6 @@
 use crate::function::FunctionStructNoName;
 use crate::{
-    class::Class, function::Function, function::FunctionStruct, vm::Types, Instruction, Value,
+    function::Function, function::FunctionStruct, vm::Types, Instruction, Value,
 };
 use fxhash::FxHashMap;
 use std::io::Read;

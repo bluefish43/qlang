@@ -3,7 +3,6 @@ use core::panic;
 use super::asmtokens::{Token, TokenType};
 use crate::class::Class;
 use crate::vm::Instruction;
-use crate::vm::RawValue;
 use crate::vm::Types;
 use crate::vm::Value;
 
@@ -609,15 +608,6 @@ impl Parser {
 
     fn parse_tuple(&mut self) -> Result<Vec<Value>, String> {
         // TODO: Implement tuple parsing logic
-        unimplemented!()
-    }
-
-    fn parse_raw_ptr(&mut self) -> Result<*const Value, String> {
-        return Err(format!("Hard-coded pointers are not supported"));
-    }
-
-    fn parse_raw_value(&mut self) -> Result<RawValue, String> {
-        // TODO: Implement raw value parsing logic
         unimplemented!()
     }
 

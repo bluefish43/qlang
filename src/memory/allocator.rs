@@ -148,6 +148,7 @@ impl GarbageCollector {
         }
     }
 
+    #[allow(unused)]
     fn is_root(&self, object_ptr: NonNull<VMValue>) -> bool {
         self.roots.contains(&object_ptr)
     }
@@ -173,6 +174,7 @@ impl GarbageCollector {
         }
     }
 
+    #[allow(unused)]
     fn get_block(&mut self) -> &mut GcBlock {
         unsafe { &mut *self.find_or_create_block() }
     }

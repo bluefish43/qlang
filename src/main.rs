@@ -6,7 +6,7 @@ use binary::asmtokens::tokenize;
 use external::get_functions;
 use vm::{RawValue, VirtualMachine};
 
-use crate::vm::{Instruction, Value, Types};
+use crate::vm::{Instruction, Value};
 
 pub mod binary;
 pub mod class;
@@ -330,44 +330,6 @@ pub fn main() {
             println!("Error: Could not read binary file: {}", err);
             exit(1)
         }
-    } else if option == String::from("writetest") {
-        let mut fs = std::fs::File::create("output.q").unwrap();
-        let instructions = vec![
-            Instruction::StartFunction(String::from("f"), vec![], Types::Boolean),
-            Instruction::Push(Value::String(String::from("Hello, world!"))),
-            Instruction::Return,
-            Instruction::EndFunction,
-            Instruction::Invoke(String::from("f")),
-        ];
-        write_instructions(&mut fs, instructions);
-        println!("DONE")
-    } else if option == String::from("runtest") {
-        let instructions = vec![
-            Instruction::IncludeStd,
-            Instruction::Invoke(String::from("panic")),
-        ];
-        let mut vm = vm::VirtualMachine::new(instructions, &"./asm".to_string()).unwrap();
-        vm.check_labels();
-        vm.link_return();
-        let result = vm.run(String::from("__main__"));
-        match result {
-            Ok(result) => {
-                println!("{}", vm::value_to_string(&result));
-                exit(0)
-            }
-            Err(err) => {
-                println!(
-                    "\nUncaught Runtime {}: {}",
-                    Color::Red.paint("Error"),
-                    Color::White.bold().paint(err)
-                );
-                println!(
-                    "{}",
-                    vm.get_opstack_backtrace(stack_backtrace_limit as usize)
-                );
-                exit(1)
-            }
-        }
     } else if option == String::from("build") {
         if !std::path::Path::new(&input).exists() {
             println!("The file '{}' does not exist.", input);
@@ -419,29 +381,5 @@ pub fn main() {
     } else {
         println!("Error: Unknown option '{}'", option);
         exit(1);
-    }
-}
-
-fn factorize(number: i32) -> Vec<i32> {
-    let mut factors = vec![];
-    let mut current = number;
-    let mut i = 0;
-    loop {
-        if current == 1 {
-            return factors;
-        }
-        if (current as f64 / i as f64).fract() == 0.0 {
-            factors.push(i);
-            current /= i;
-            i = 2;
-        } else {
-            i += 1;
-            if i as f64 > (number as f64 / 2.0) {
-                factors.push(current);
-                return factors;
-            } else {
-                continue;
-            }
-        }
     }
 }

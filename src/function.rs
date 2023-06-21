@@ -1,5 +1,5 @@
 use std::fmt::Debug;
-use std::io::{stdin, stdout};
+use std::io::stdin;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +20,7 @@ pub enum Function {
     Interpreted(FunctionStruct),
 }
 
+#[allow(unused)]
 macro_rules! my_format {
     ($format_string:expr) => {
         format!($format_string)

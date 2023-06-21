@@ -155,7 +155,7 @@ pub fn raw_to_value(raw_value: RawValue) -> Value {
             };
             Value::Error(error_value)
         }
-        RawValue::RawPtr(p) => panic!("Cannot convert raw pointer to common pointer"),
+        RawValue::RawPtr(_) => panic!("Cannot convert raw pointer to common pointer"),
     }
 }
 
@@ -2156,20 +2156,20 @@ impl VirtualMachine {
                         }
                     }
                 }
-                Instruction::GetClassProperty(classname, property) => {
-                    panic!("GetClassProperty is deprecated")
+                Instruction::GetClassProperty(_, _) => {
+                    return Err("GetClassProperty is deprecated".to_string());
                 }
-                Instruction::InvokeClassMethod(classname, name) => {
-                    panic!("InvokeClassMethod is deprecated")
+                Instruction::InvokeClassMethod(_, _) => {
+                    return Err("InvokeClassMethod is deprecated".to_string());
                 }
-                Instruction::SetClassProperty(classname, name, val) => {
-                    panic!("SetClassProperty is deprecated")
+                Instruction::SetClassProperty(_, _, _) => {
+                    return Err("SetClassProperty is deprecated".to_string());
                 }
-                Instruction::ClassHasProperty(classname, property) => {
-                    panic!("ClassHasProperty is deprecated")
+                Instruction::ClassHasProperty(_, _) => {
+                    return Err("ClassHasProperty is deprecated".to_string());
                 }
-                Instruction::ClassHasStaticMethod(classname, staticmethod) => {
-                    panic!("ClassHasStaticMethod is deprecated")
+                Instruction::ClassHasStaticMethod(_, _) => {
+                    return Err("ClassHasStaticMethod is deprecated".to_string());
                 }
                 Instruction::HaltFromStack => {
                     let val = self.stack.pop();
@@ -2886,41 +2886,13 @@ impl VirtualMachine {
                                         }
                                     }
                                     Types::BigInt => {
-                                        if let casted = f as i64 {
-                                            self.stack.push(Value::BigInt(casted));
-                                        } else {
-                                            if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
-                                                            "Cannot cast value into {:?}: Overflow or underflow occurred",
-                                                            t
-                                                        )));
-                                            } else {
-                                                return Err(format!(
-                                                            "Cannot cast value into {:?}: Overflow or underflow occurred",
-                                                            t
-                                                        ));
-                                            }
-                                        }
+                                        self.stack.push(Value::BigInt(f as i64));
                                     }
                                     Types::Float => {
                                         self.stack.push(Value::Float(f));
                                     }
                                     Types::LFloat => {
-                                        if let casted = f as f32 {
-                                            self.stack.push(Value::LFloat(casted));
-                                        } else {
-                                            if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
-                                                            "Cannot cast value into {:?}: Overflow or underflow occurred",
-                                                            t
-                                                        )));
-                                            } else {
-                                                return Err(format!(
-                                                            "Cannot cast value into {:?}: Overflow or underflow occurred",
-                                                            t
-                                                        ));
-                                            }
-                                        }
+                                        self.stack.push(Value::LFloat(f as f32));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -2955,21 +2927,7 @@ impl VirtualMachine {
                                         }
                                     }
                                     Types::BigInt => {
-                                        if let casted = f as i64 {
-                                            self.stack.push(Value::BigInt(casted));
-                                        } else {
-                                            if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
-                                                            "Cannot cast value into {:?}: Overflow or underflow occurred",
-                                                            t
-                                                        )));
-                                            } else {
-                                                return Err(format!(
-                                                            "Cannot cast value into {:?}: Overflow or underflow occurred",
-                                                            t
-                                                        ));
-                                            }
-                                        }
+                                        self.stack.push(Value::BigInt(f as i64));
                                     }
                                     Types::Float => {
                                         self.stack.push(Value::Float(f as f64));
@@ -3325,7 +3283,7 @@ impl VirtualMachine {
                 Instruction::ReadFromFileHandle(bytes) => {
                     match self.stack.pop() {
                         Some(Value::FileHandle((handle, _))) => {
-                            let mut reference = unsafe { handle.as_mut().unwrap() };
+                            let reference = unsafe { handle.as_mut().unwrap() };
                             let mut buffer = Vec::with_capacity(*bytes);
                             let res = reference.read_exact(&mut buffer);
                             match res {
@@ -3372,7 +3330,7 @@ impl VirtualMachine {
                 Instruction::ReadFileHandleToString => {
                     match self.stack.pop() {
                         Some(Value::FileHandle((handle, _))) => {
-                            let mut reference = unsafe { handle.as_mut().unwrap() };
+                            let reference = unsafe { handle.as_mut().unwrap() };
                             let mut buffer = String::new();
                             let res = reference.read_to_string(&mut buffer);
                             match res {
@@ -3419,7 +3377,7 @@ impl VirtualMachine {
                 Instruction::ReadFileHandleToBytes => {
                     match self.stack.pop() {
                         Some(Value::FileHandle((handle, _))) => {
-                            let mut reference = unsafe { handle.as_mut().unwrap() };
+                            let reference = unsafe { handle.as_mut().unwrap() };
                             let mut buffer = Vec::new();
                             let res = reference.read_to_end(&mut buffer);
                             match res {
@@ -3803,7 +3761,7 @@ impl VirtualMachine {
                             }
                             match self.stack.pop() {
                                 Some(Value::FileHandle((handle, _))) => {
-                                    let mut reference = unsafe { handle.as_mut().unwrap() };
+                                    let reference = unsafe { handle.as_mut().unwrap() };
                                     let mut buffer = Vec::with_capacity(bytes as usize);
                                     let res = reference.read_exact(&mut buffer);
                                     match res {
@@ -3941,7 +3899,7 @@ impl VirtualMachine {
                                 if has_defined_public_properties {
                                     return Err(format!("Redefinition of public fields inside a class is not allowed"));
                                 }
-                                has_defined_public_methods = true;
+                                has_defined_public_properties = true;
                                 loop {
                                     match self.instructions.get(self.pc as usize) {
                                         Some(Instruction::DefineField(name, type_of_field)) => {
@@ -4094,7 +4052,7 @@ impl VirtualMachine {
                                     }
                                 }
                             }
-                            Instruction::InheritFrom(from) => {
+                            Instruction::InheritFrom(_) => {
                                 panic!("Inheritance is currently not implemented.")
                             }
                             Instruction::ConstructorFunctionDefinition(args, return_type) => {

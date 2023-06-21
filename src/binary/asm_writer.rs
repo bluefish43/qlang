@@ -304,6 +304,7 @@ pub fn write_instruction<W: Write>(w: &mut W, instruction: Instruction) -> std::
         }
         Instruction::ClassMethodDefinition(name, args, returns) => {
             w.write_all(&[96])?;
+            write_string(w, name)?;
             write_parameter_list(w, args)?;
             write_type(w, returns)?;
         }
@@ -377,7 +378,7 @@ pub fn write_string<W: Write>(w: &mut W, s: String) -> std::io::Result<()> {
 pub fn write_value<W: Write>(w: &mut W, v: Value) -> std::io::Result<()> {
     match v {
         Value::None => w.write_all(&[0])?,
-        Value::Class(c) => {
+        Value::Class(_) => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Classes cannot be written to binary"
