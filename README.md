@@ -6,7 +6,6 @@ QLang is a blazingly fast virtual machine that allows you to run programs writte
 
 - **Custom instruction set**: Qlang has its own custom instruction set, designed for maximum performance and flexibility.
 - **Blazingly fast**: Qlang is optimized for speed, allowing you to run your programs as quickly as possible.
-- **Easy to use**: Qlang is easy to use, with clear and concise documentation to help you get started.
 
 ## Installation 💾
 
