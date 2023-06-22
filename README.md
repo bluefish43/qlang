@@ -18,7 +18,6 @@ To use Qlang, simply run the `qlang` command followed by the path to the program
 
 qlang [options] <program>
 
-
 - `options`: Optional flags that modify the behavior of the virtual machine.
 - `program`: The path to the program you want to run.
 

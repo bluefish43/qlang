@@ -42,7 +42,7 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                         let identifier_len = identifier.len();
                         column += identifier_len;
                         if [
-                            "decl", "readln", "putln", "fls", "puterr", "fls", "puterr", "flserr",
+                            "decl", "readln", "putln", "fls", "puterr", "flserr",
                             "assgn", "assgntop", "throw", "push", "pop", "ld", "jmp", "label",
                             "jmps", "add", "sub", "mul", "div", "mod", "pow", "and", "or", "xor",
                             "not", "eq", "ne", "gt", "lt", "gte", "lte", "cth", "ecth", "istd",
