@@ -364,6 +364,9 @@ pub fn write_instruction<W: Write>(w: &mut W, instruction: Instruction) -> std::
         Instruction::MakeCurrentObjectNone => {
             w.write_all(&[112])?;
         }
+        Instruction::AllocArgsToLocal => {
+            w.write_all(&[113])?;
+        }
     }
     Ok(())
 }

@@ -512,6 +512,8 @@ pub enum Instruction {
 
     PushCurrentObject,
     MakeCurrentObjectNone,
+
+    AllocArgsToLocal,
 }
 
 pub struct VirtualMachine {
@@ -540,6 +542,8 @@ pub struct VirtualMachine {
     stack_before: Vec<Value>,
     expected_return_types: Vec<Types>,
     current_object: Option<*mut Class>,
+
+    args_to_alloc: Vec<FxHashMap<String, Value>>,
 }
 
 impl VirtualMachine {
@@ -577,6 +581,7 @@ impl VirtualMachine {
                 stack_before: Vec::new(),
                 expected_return_types: Vec::new(),
                 current_object: None,
+                args_to_alloc: Vec::new(),
             })
         } else {
             unreachable!()
@@ -614,9 +619,8 @@ impl VirtualMachine {
                 self.instructions.insert(i, Instruction::Return);
                 self.instructions.insert(i, Instruction::Collect);
                 self.instructions.insert(i, Instruction::RestoreSequestratedVariables);
-                i += 1;
             }
-            i += 1;
+            i += 3;
         }
     }
 
@@ -692,6 +696,7 @@ impl VirtualMachine {
         );
         while self.pc < (self.instructions.len() - 1).try_into().unwrap() {
             self.pc += 1;
+            //eprintln!("{:?}", &self.instructions[self.pc as usize]);
             match &self.instructions[self.pc as usize] {
                 Instruction::Declare(name, value) => {
                     if self.variables.contains_key(name) {
@@ -2066,10 +2071,12 @@ impl VirtualMachine {
                                     self.block_len = fun_body_len as i64;
                                     let zipped = fun.args.clone().into_iter();
                                     let zipped = zipped.zip(args.into_iter());
+                                    let mut new_args = FxHashMap::default();
                                     for ((varname, _), value) in zipped {
-                                        self.allocate_variable(varname, value);
+                                        new_args.insert(varname, value);
                                     }
-                                    self.check_labels_from_pc(fun_body_len);
+                                    self.args_to_alloc.push(new_args);
+                                    self.check_labels_from_pc(self.pc as usize);
                                 }
                             }
                             _ => {
@@ -2183,6 +2190,7 @@ impl VirtualMachine {
                     body.push(Instruction::SequestrateVariables);
                     body.push(Instruction::Push(Value::String(name.clone())));
                     body.push(Instruction::PopToRoot(String::from("__function__")));
+                    body.push(Instruction::AllocArgsToLocal);
                     self.pc += 1;
                     while let Some(instruction) = self.instructions.get(self.pc as usize) {
                         match instruction {
@@ -2245,7 +2253,7 @@ impl VirtualMachine {
                         if let Err(err) = instructions {
                             return Err(format!("Could not read instructions from file: {err}"));
                         } else if let Ok(ins) = instructions {
-                            let mut new_runtime_proto = VirtualMachine::new(ins, path)?;
+                            let mut new_runtime_proto = VirtualMachine::new(ins, &newpath.as_os_str().to_string_lossy().to_string())?;
                             new_runtime_proto.check_labels();
                             new_runtime_proto.run(String::from("__module__"))?;
                             self.functions
@@ -2690,9 +2698,11 @@ impl VirtualMachine {
                                         self.block_len = fun_body_len as i64;
                                         let zipped = fun.args.clone().into_iter();
                                         let zipped = zipped.zip(args.into_iter());
+                                        let mut new_args = FxHashMap::default();
                                         for ((varname, _), value) in zipped {
-                                            self.allocate_variable(varname, value);
+                                            new_args.insert(varname, value);
                                         }
+                                        self.args_to_alloc.push(new_args);
                                     }
                                 }
                                 Function::Closure(fun) => {
@@ -4610,11 +4620,12 @@ impl VirtualMachine {
                                                 self.block_len = (fun_body_len + 1) as i64;
                                                 let zipped = fun.args.clone().into_iter();
                                                 let zipped = zipped.zip(args.into_iter());
+                                                let mut new_args = FxHashMap::default();
                                                 for ((varname, _), value) in zipped {
-                                                    self.allocate_variable(varname, value);
+                                                    new_args.insert(varname, value);
                                                 }
+                                                self.args_to_alloc.push(new_args);
                                                 self.check_labels_from_pc(fun_body_len);
-                                                eprintln!("{:#?}", fun.body);
                                             }
                                         }
                                         _ => {
@@ -4729,9 +4740,11 @@ impl VirtualMachine {
                                                 self.block_len = fun_body_len as i64;
                                                 let zipped = fun.args.clone().into_iter();
                                                 let zipped = zipped.zip(args.into_iter());
+                                                let mut new_args = FxHashMap::default();
                                                 for ((varname, _), value) in zipped {
-                                                    self.allocate_variable(varname, value);
+                                                    new_args.insert(varname, value);
                                                 }
+                                                self.args_to_alloc.push(new_args);
                                                 self.check_labels_from_pc(fun_body_len);
                                             }
                                         }
@@ -4847,9 +4860,11 @@ impl VirtualMachine {
                                                 self.block_len = fun_body_len as i64;
                                                 let zipped = fun.args.clone().into_iter();
                                                 let zipped = zipped.zip(args.into_iter());
+                                                let mut new_args = FxHashMap::default();
                                                 for ((varname, _), value) in zipped {
-                                                    self.allocate_variable(varname, value);
+                                                    new_args.insert(varname, value);
                                                 }
+                                                self.args_to_alloc.push(new_args);
                                                 self.check_labels_from_pc(fun_body_len);
                                             }
                                         }
@@ -4908,6 +4923,15 @@ impl VirtualMachine {
                 }
                 Instruction::MakeCurrentObjectNone => {
                     self.current_object = None;
+                }
+                Instruction::AllocArgsToLocal => {
+                    if let Some(args) = self.args_to_alloc.pop() {
+                        for (name, value) in args {
+                            self.allocate_variable(name, value);
+                        }
+                    } else {
+                        return Err(format!("No arguments to allocate"));
+                    }
                 }
             }
         }

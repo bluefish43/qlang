@@ -22,7 +22,7 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
     let mut iterator = input.chars().peekable();
     let mut tokens_stream: Vec<Token> = Vec::new();
     let mut line = 1;
-    let mut column = 0;
+    let mut column = 1;
     loop {
         match iterator.next() {
             Some(character) => {
@@ -30,15 +30,14 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                     'a'..='z' | 'A'..='Z' => {
                         let mut identifier = String::new();
                         identifier.push(character);
-                        while let Some(c) = iterator.next() {
-                            if c.is_whitespace() {
-                                break;
-                            } else if c.is_alphanumeric() || c == '_' {
+                        while let Some(c) = iterator.peek().cloned() {
+                            if !c.is_whitespace() && (c.is_alphanumeric() || c == '_') {
+                                iterator.next();
                                 identifier.push(c);
                             } else {
                                 break;
                             }
-                        }
+                        }                                                                                       
                         let identifier_len = identifier.len();
                         column += identifier_len;
                         if [
@@ -109,15 +108,14 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                     '0'..='9' => {
                         let mut number = String::new();
                         number.push(character);
-                        while let Some(c) = iterator.next() {
-                            if c.is_numeric() {
-                                number.push(c);
-                            } else if c == '.' {
+                        while let Some(c) = iterator.peek().cloned() {
+                            if c.is_numeric() || c == '.' {
+                                iterator.next();
                                 number.push(c);
                             } else {
                                 break;
                             }
-                        }
+                        }                        
                         if number.contains('.') {
                             let parsed_number = number.parse::<f64>();
                             if let Ok(num) = parsed_number {
@@ -166,12 +164,14 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                                 }
                                 '\n' => {
                                     line += 1;
+                                    column = 1;
                                     string.push('\n');
                                 }
                                 '\r' => {
                                     if Some(&'\n') == iterator.peek() {
+                                        string.push_str("\n");
                                         line += 1;
-                                        string.push_str("\r\n");
+                                        column = 1;
                                         iterator.next();
                                     } else {
                                         string.push('\r');
@@ -254,6 +254,7 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                             line,
                             column,
                         });
+                        column += strlen + 2;
                     }
                     '\'' => {
                         let mut inner_string = String::new();
@@ -333,13 +334,13 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                             ));
                         }
                         let string_len = inner_string.len() + 2;
-                        column += string_len;
                         tokens_stream.push(Token {
                             token_type: TokenType::Char(inner_string),
                             length: string_len,
                             line,
                             column,
-                        })
+                        });
+                        column += string_len;
                     }
                     '-' => {
                         if Some(&'-') == iterator.peek() {
@@ -347,7 +348,7 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                             while let Some(c) = iterator.next() {
                                 if c == '\n' {
                                     line += 1;
-                                    column = 0;
+                                    column = 1;
                                     break;
                                 } else {
                                     continue;
@@ -355,7 +356,7 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                             }
                         } else {
                             return Err(format!(
-                                "{}:{}:{}: Unrecognized token '-{}'",
+                                "{}:{}:{}: Unrecognized token: '-{}'",
                                 filename,
                                 line,
                                 column,
@@ -364,15 +365,16 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                         }
                     }
                     '\n' => {
-                        column = 0;
+                        column = 1;
                         line += 1;
                     }
                     _ => {
                         if character.is_whitespace() {
+                            column += 1;
                             continue;
                         } else {
                             return Err(format!(
-                                "{}:{}:{}: Unrecognized token '{}'",
+                                "{}:{}:{}: Unrecognized token: '{}'",
                                 filename, line, column, character
                             ));
                         }

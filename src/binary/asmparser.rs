@@ -194,7 +194,7 @@ impl Parser {
                     "lst" => {
                         instructions.push(Instruction::LoopStart);
                     }
-                    "lend" => {
+                    "lnd" => {
                         instructions.push(Instruction::LoopEnd);
                     }
                     "inln" => {
