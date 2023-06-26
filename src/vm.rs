@@ -17,6 +17,12 @@ use std::{
     sync::Arc,
 };
 
+pub struct VMErrorInfo {
+    pub message: String,
+    pub backtrace: String,
+    pub on_instruction: usize,
+}
+
 fn colorize_string(input: &str) -> String {
     let mut result = String::new();
     let mut is_inside_quotes = false;
@@ -585,6 +591,57 @@ impl VirtualMachine {
             })
         } else {
             unreachable!()
+        }
+    }
+
+    pub fn get_opstack_backtrace(&self, mut limit: usize) -> String {
+        let mut trace = String::new();
+
+        match std::env::var("Q_STACK_BACKTRACE_LIM") {
+            Ok(value) => {
+                if value.to_lowercase() == String::from("full") {
+                    let remaining_instructions = self.instructions.iter().skip(self.pc as usize);
+                    for instr in remaining_instructions {
+                        trace
+                            .push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
+                    }
+                } else if let Ok(lim) = u64::from_str_radix(&value, 10) {
+                    limit = lim as usize;
+                    let remaining_instructions =
+                        self.instructions.iter().skip(self.pc as usize).take(limit);
+                    for instr in remaining_instructions {
+                        trace
+                            .push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
+                    }
+                } else {
+                    if let Err(err) = u64::from_str_radix(&value, 10) {
+                        println!("Warning: Invalid enviroment variable Q_STACK_BACKTRACE_LIM value set: can be either a number or full\n\t--> Error parsing number: {}\n\t--> Using default value", err);
+                    }
+                    let remaining_instructions =
+                        self.instructions.iter().skip(self.pc as usize).take(limit);
+                    for instr in remaining_instructions {
+                        trace
+                            .push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
+                    }
+                }
+            }
+            _ => {
+                let remaining_instructions =
+                    self.instructions.iter().skip(self.pc as usize).take(limit);
+                for instr in remaining_instructions {
+                    trace.push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
+                }
+            }
+        }
+
+        trace
+    }
+
+    pub fn generate_error_info(&mut self, message: String) -> VMErrorInfo {
+        VMErrorInfo {
+            message,
+            backtrace: self.get_opstack_backtrace(7),
+            on_instruction: self.pc as usize,
         }
     }
 
@@ -4936,49 +4993,5 @@ impl VirtualMachine {
             }
         }
         Ok(Value::None)
-    }
-
-    pub fn get_opstack_backtrace(&self, mut limit: usize) -> String {
-        let mut trace = String::new();
-        trace.push_str("Stack backtrace:\n");
-
-        match std::env::var("Q_STACK_BACKTRACE_LIM") {
-            Ok(value) => {
-                if value.to_lowercase() == String::from("full") {
-                    let remaining_instructions = self.instructions.iter().skip(self.pc as usize);
-                    for instr in remaining_instructions {
-                        trace
-                            .push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
-                    }
-                } else if let Ok(lim) = u64::from_str_radix(&value, 10) {
-                    limit = lim as usize;
-                    let remaining_instructions =
-                        self.instructions.iter().skip(self.pc as usize).take(limit);
-                    for instr in remaining_instructions {
-                        trace
-                            .push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
-                    }
-                } else {
-                    if let Err(err) = u64::from_str_radix(&value, 10) {
-                        println!("Warning: Invalid enviroment variable Q_STACK_BACKTRACE_LIM value set: can be either a number or full\n\t--> Error parsing number: {}\n\t--> Using default value", err);
-                    }
-                    let remaining_instructions =
-                        self.instructions.iter().skip(self.pc as usize).take(limit);
-                    for instr in remaining_instructions {
-                        trace
-                            .push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
-                    }
-                }
-            }
-            _ => {
-                let remaining_instructions =
-                    self.instructions.iter().skip(self.pc as usize).take(limit);
-                for instr in remaining_instructions {
-                    trace.push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
-                }
-            }
-        }
-
-        trace
     }
 }

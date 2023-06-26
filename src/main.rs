@@ -15,6 +15,7 @@ pub mod function;
 pub mod gcwrapper;
 pub mod memory;
 pub mod vm;
+pub mod strstrip;
 
 use std::env::args;
 use std::fs::{File, canonicalize};
@@ -335,11 +336,13 @@ pub fn main() -> ExitCode {
                     return ExitCode::SUCCESS;
                 }
                 Err(err) => {
+                    let info = runtime.generate_error_info(err);
                     println!(
-                        "Uncaught Runtime {}: {}",
-                        Color::Red.paint("Error"),
-                        Color::White.bold().paint(err)
+                        "{}: {}",
+                        Color::Red.bold().paint("Error"),
+                        Color::White.bold().paint(info.message)
                     );
+                    println!("Backtrace:");
                     println!(
                         "{}",
                         runtime.get_opstack_backtrace(stack_backtrace_limit as usize)

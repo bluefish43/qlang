@@ -2092,3 +2092,39 @@ pub fn get_math() -> Vec<(String, Function)> {
 
     natives
 }
+
+pub fn get_half_natives() -> Vec<(String, Function)> {
+    let mut natives: Vec<(String, Function)> = Vec::new();
+    
+    natives.push(("open_file".to_string(), Function::Interpreted(FunctionStruct {
+        name: "open_file".to_string(),
+        args: vec![("file_name".to_string(), Types::String)],
+        returns: Types::FileHandle,
+        body: [
+            Instruction::SequestrateVariables,
+            Instruction::Push(Value::String("open_file".to_string())),
+            Instruction::PopToRoot(String::from("__function__")),
+            Instruction::AllocArgsToLocal,
+            Instruction::Load("file_name".to_string()),
+            Instruction::GetReadFileHandleStack,
+            Instruction::Return,
+        ].to_vec(),
+    })));
+
+    natives.push(("create_file".to_string(), Function::Interpreted(FunctionStruct {
+        name: "create_file".to_string(),
+        args: vec![("file_name".to_string(), Types::String)],
+        returns: Types::FileHandle,
+        body: [
+            Instruction::SequestrateVariables,
+            Instruction::Push(Value::String("create_file".to_string())),
+            Instruction::PopToRoot(String::from("__function__")),
+            Instruction::AllocArgsToLocal,
+            Instruction::Load("file_name".to_string()),
+            Instruction::GetWriteFileHandleStack,
+            Instruction::Return,
+        ].to_vec(),
+    })));
+
+    return natives;
+}
