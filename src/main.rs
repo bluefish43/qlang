@@ -3,8 +3,10 @@ use binary::asm::read_instructions;
 use binary::asm_writer::write_instructions;
 use binary::asmparser::Parser;
 use binary::asmtokens::tokenize;
+use control::IOControllerW;
 use external::get_functions;
 use vm::{RawValue, VirtualMachine};
+use async_std::task;
 
 use crate::vm::{Instruction, Value};
 
@@ -16,14 +18,19 @@ pub mod gcwrapper;
 pub mod memory;
 pub mod vm;
 pub mod strstrip;
+pub mod control;
 
 use std::env::args;
 use std::fs::{File, canonicalize};
-use std::io::Read;
+use std::io::{Read, stdout, stderr};
 use std::process::{ExitCode};
 use std::sync::Arc;
 use std::time::Instant;
 use chrono::prelude::*;
+use std::io::{self, Write};
+use crate::control::IOControllerI;
+use std::io::BufReader;
+
 
 fn get_current_time() -> String {
     let local: DateTime<Local> = Local::now();
@@ -31,7 +38,7 @@ fn get_current_time() -> String {
 }
 
 fn usage(program_name: &str) {
-    println!(
+    eprintln!(
         "Usage: {} <OPTION> [ARGS]
 OPTIONS:
     run                                         Runs the program stored at the filepath specified
@@ -49,17 +56,24 @@ ARGS:
     );
 }
 
-pub fn main() -> ExitCode {
+fn main() -> ExitCode {
     let mut option = String::new();
     let mut input = String::new();
     let mut debug = false;
     let mut output = String::new();
     let mut libraries_to_load_with_fns: Vec<(String, Vec<String>)> = Vec::new();
-    let mut stack_backtrace_limit = 7;
+    let mut stack_backtrace_limit: i64 = 7;
     let mut default_recursion_depth = 1000;
     let mut depth_is_active = true;
     let mut is_silent = false;
     let mut hide_return = false;
+    let mut timeout = None;
+
+    let mut stdout_binding = stdout();
+    let mut stderr_binding = stderr();
+
+    let mut stdout = IOControllerW::new(&mut stdout_binding);
+    let mut stderr = IOControllerW::new(&mut stderr_binding);
 
     let program_name = "qlang";
 
@@ -68,7 +82,7 @@ pub fn main() -> ExitCode {
     let mut args = args().skip(1);
 
     if args.len() < 1 {
-        println!("Error: Minimum number of arguments is 1");
+        eprintln!("Error: Minimum number of arguments is 1");
         usage(program_name);
         return ExitCode::FAILURE;
     }
@@ -78,7 +92,7 @@ pub fn main() -> ExitCode {
             Some(arg) => match arg.as_str() {
                 "-d" | "--debug" => {
                     if debug == true {
-                        println!("Error: -d | --debug can only be used once");
+                        eprintln!("Error: -d | --debug can only be used once");
                         return ExitCode::FAILURE;
                     }
                     debug = true;
@@ -86,103 +100,122 @@ pub fn main() -> ExitCode {
                 "-i" | "--input" => match args.next() {
                     Some(arg) => {
                         if input.as_str() != "" {
-                            println!("Error: -i | --input can only be used once");
+                            eprintln!("Error: -i | --input can only be used once");
                             return ExitCode::FAILURE;
                         }
                         input = arg;
                     }
                     None => {
-                        println!("Error: -i | --input requires an argument");
+                        eprintln!("Error: -i | --input requires an argument");
                         return ExitCode::FAILURE;
                     }
                 },
                 "-o" | "--output" => match args.next() {
                     Some(arg) => {
                         if output.as_str() != "" {
-                            println!("Error: -o | --output can only be used once");
+                            eprintln!("Error: -o | --output can only be used once");
                             return ExitCode::FAILURE;
                         }
                         output = arg;
                     }
                     None => {
-                        println!("Error: -o | --output requires an argument");
+                        eprintln!("Error: -o | --output requires an argument");
                         return ExitCode::FAILURE;
                     }
                 },
                 "-q" | "--quiet" => {
                     if is_silent {
-                        println!("Error: -q | --quiet can only be used once");
+                        eprintln!("Error: -q | --quiet can only be used once");
                         return ExitCode::FAILURE;
                     }
                     is_silent = true;
                 }
                 "--hide-return" | "--noreturn" => {
                     if hide_return {
-                        println!("Error: --hide-return | --noreturn can only be used once");
+                        eprintln!("Error: --hide-return | --noreturn can only be used once");
                         return ExitCode::FAILURE;
                     }
                     hide_return = true;
                 }
+                "--timeout" => match args.next() {
+                    Some(arg) => {
+                        if timeout != None {
+                            eprintln!("Error: --timeout can only be used once");
+                            return ExitCode::FAILURE;
+                        }
+                        let res = arg.parse::<usize>();
+                        if let Ok(res) = res {
+                            timeout = Some(res);
+                        } else if let Err(err) = res {
+                            eprintln!("Error: could not parse content obtained as argument to --timeout as an unsigned integer: {}", err);
+                            return ExitCode::FAILURE;
+                        }
+                    }
+                    None => {
+                        eprintln!("Error: --timeout requires an argument");
+                        return ExitCode::FAILURE;
+                    }
+                }
                 "run" => {
                     if option != String::new() {
-                        println!("Error: The main option can only be used once");
+                        eprintln!("Error: The main option can only be used once");
                         return ExitCode::FAILURE;
                     }
                     option = arg;
                 }
                 "build" => {
                     if option != String::new() {
-                        println!("Error: The main option can only be used once");
+                        eprintln!("Error: The main option can only be used once");
                         return ExitCode::FAILURE;
                     }
                     option = arg;
                 }
                 "cbuild" => {
                     if option != String::new() {
-                        println!("Error: The main option can only be used once");
+                        eprintln!("Error: The main option can only be used once");
                         return ExitCode::FAILURE;
                     }
                     option = arg;
                 }
                 "--stack-backtrace-lim" => {
                     if stack_backtrace_limit != 7 {
-                        println!("Error: The --stack-backtrace-lim option can only be used once");
+                        eprintln!("Error: The --stack-backtrace-lim option can only be used once");
                         return ExitCode::FAILURE;
                     } else {
                         match args.next() {
                             Some(arg) => {
                                 let parsed_u32 = arg.parse::<u32>();
                                 if parsed_u32.is_err() {
-                                    println!("Error: --stack-backtrace-lim requires a positive numeric argument");
+                                    eprintln!("Error: --stack-backtrace-lim requires a positive numeric argument");
                                     return ExitCode::FAILURE;
                                 } else {
-                                    stack_backtrace_limit = parsed_u32.unwrap();
+                                    stack_backtrace_limit = parsed_u32.unwrap() as i64;
                                 }
                             }
                             None => {
-                                println!("Error: --stack-backtrace-lim requires an argument");
+                                eprintln!("Error: --stack-backtrace-lim requires an argument");
                                 return ExitCode::FAILURE;
                             }
                         }
                     }
                 }
                 "--max-recursion-depth" => {
-                    if stack_backtrace_limit != 3000 {
-                        println!("Error: The --max-recursion-depth option can only be used once");
+                    if default_recursion_depth != 1000 {
+                        eprintln!("Error: The --max-recursion-depth option can only be used once");
                         return ExitCode::FAILURE;
                     } else {
                         match args.next() {
                             Some(arg) => {
                                 let parsed_usize = arg.parse::<usize>();
                                 if parsed_usize.is_err() {
-                                    println!("Error: --max-recursion-depth requires a positive numeric argument");
+                                    eprintln!("Error: --max-recursion-depth requires a positive numeric argument");
                                     return ExitCode::FAILURE;
                                 } else {
                                     default_recursion_depth = parsed_usize.unwrap();
                                 }
                             }
                             None => {
-                                println!("Error: --max-recursion-depth requires an argument");
+                                eprintln!("Error: --max-recursion-depth requires an argument");
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -190,21 +223,21 @@ pub fn main() -> ExitCode {
                 }
                 "--ignore-recursion-depth" => {
                     if depth_is_active != true {
-                        println!("Error: The --ignore-recursion-depth option can only be used once");
+                        eprintln!("Error: The --ignore-recursion-depth option can only be used once");
                         return ExitCode::FAILURE;
                     } else {
                         match args.next() {
                             Some(arg) => {
                                 let parsed_bool = arg.parse::<bool>();
                                 if parsed_bool.is_err() {
-                                    println!("Error: --ignore-recursion-depth requires a boolean argument");
+                                    eprintln!("Error: --ignore-recursion-depth requires a boolean argument");
                                     return ExitCode::FAILURE;
                                 } else {
                                     depth_is_active = parsed_bool.unwrap();
                                 }
                             }
                             None => {
-                                println!("Error: --ignore-recursion-depth requires an argument");
+                                eprintln!("Error: --ignore-recursion-depth requires an argument");
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -213,7 +246,7 @@ pub fn main() -> ExitCode {
                 "-e" | "--extern" => {
                     let library_name = args.next();
                     if let None = library_name {
-                        println!("Error: -e | --extern requires a library to load");
+                        eprintln!("Error: -e | --extern requires a library to load");
                         return ExitCode::FAILURE;
                     }
                     let library_name = library_name.unwrap();
@@ -230,7 +263,7 @@ pub fn main() -> ExitCode {
                                 }
                             },
                             None => {
-                                println!("Error: Unclosed -e | --extern parameters");
+                                eprintln!("Error: Unclosed -e | --extern parameters");
                                 return ExitCode::FAILURE;
                             }
                         }
@@ -243,7 +276,7 @@ pub fn main() -> ExitCode {
                     break;
                 }
                 _ => {
-                    println!("Error: Unknown command line option: {}", arg);
+                    eprintln!("Error: Unknown command line option: {}", arg);
                     return ExitCode::FAILURE;
                 }
             },
@@ -253,7 +286,7 @@ pub fn main() -> ExitCode {
     if option == String::from("run") {
         let start = Instant::now();
         if !std::path::Path::new(&input).exists() {
-            println!("Error: The file '{}' does not exist.", input);
+            eprintln!("Error: The file '{}' does not exist.", input);
             return ExitCode::FAILURE;
         }
         if !is_silent {
@@ -261,7 +294,7 @@ pub fn main() -> ExitCode {
         }
         let file = std::fs::File::open(&input);
         if let Err(error) = file {
-            println!("Error: Could not open file: {}", error);
+            eprintln!("Error: Could not open file: {}", error);
             return ExitCode::FAILURE;
         }
         let mut extern_fns = vec![];
@@ -273,7 +306,7 @@ pub fn main() -> ExitCode {
             if let Ok(library) = library {
                 extern_fns.extend(library.into_iter());
             } else if let Err(err) = library {
-                println!("Error: Could not get extern library {}: {}", libname, err);
+                eprintln!("Error: Could not get extern library {}: {}", libname, err);
                 return ExitCode::FAILURE;
             }
         }
@@ -306,7 +339,7 @@ pub fn main() -> ExitCode {
                     })
                     .collect::<Vec<_>>(),
             ));
-
+            
             runtime.extend_functions_wextern(fns_static_ref);
             runtime.set_max_recursiveness_level(default_recursion_depth);
             runtime.allocate_variable_in_root(String::from("args"), Value::List(program_args));
@@ -326,70 +359,87 @@ pub fn main() -> ExitCode {
                 eprintln!("{}tasks in {}.{:09} seconds", Color::Green.bold().paint(" Finished "), seconds, nanoseconds);
                 eprintln!("{}`{}`", Color::Green.bold().paint("  Running "), &canonicalize(input).unwrap().to_str().unwrap()[4..]);
             }
-            let result = runtime.run(String::from("__main__"));
-            match result {
+            let result = runtime.run(String::from("__main__"), &start, timeout, &mut stdout, &mut stderr);
+            match task::block_on(result) {
                 Ok(result) => {
                     if is_silent || hide_return {
                         return ExitCode::SUCCESS;
                     }
-                    println!("{}", vm::value_to_string(&result));
+                    eprintln!("{}", vm::value_to_string(&result));
+                    let duration = start.elapsed();
+                    let seconds = duration.as_secs();
+                    let nanoseconds = duration.subsec_micros();
+                    eprintln!("{}ended program in {}.{:09} seconds", Color::Green.bold().paint(" Success "), seconds, nanoseconds);
                     return ExitCode::SUCCESS;
                 }
                 Err(err) => {
+                    stdout.lock();
+                    stderr.lock();
+                    stderr.clear();
+                    stdout.clear();
+                    stderr.unlock();
                     let info = runtime.generate_error_info(err);
-                    println!(
-                        "{}: {}",
-                        Color::Red.bold().paint("Error"),
-                        Color::White.bold().paint(info.message)
-                    );
-                    println!("Backtrace:");
-                    println!(
-                        "{}",
-                        runtime.get_opstack_backtrace(stack_backtrace_limit as usize)
-                    );
+                    {
+                        let _ = writeln!(
+                            stderr,
+                            "{}: {}",
+                            Color::Red.bold().paint("Error"),
+                            Color::White.bold().paint(info.message)
+                        );
+                        let _ = stderr.flush();
+                    }
+                    eprintln!("Backtrace:");
+                    {
+                        let _ = writeln!(
+                            stderr,
+                            "{}",
+                            runtime.get_opstack_backtrace(stack_backtrace_limit as usize)
+                        );
+                        let _ = stderr.flush();
+                    }
                     return ExitCode::FAILURE;
                 }
             }
         } else if let Err(err) = instructions {
-            println!("Error: Could not read binary file: {}", err);
+            eprintln!("Error: Could not read binary file: {}", err);
             return ExitCode::FAILURE;
         } else {
             unreachable!()
         }
     } else if option == String::from("build") {
         if &input == "" {
-            println!("Error: Input file not specified");
+            eprintln!("Error: Input file not specified");
         }
         if !std::path::Path::new(&input).exists() {
-            println!("Error: The file '{}' does not exist.", input);
+            eprintln!("Error: The file '{}' does not exist.", input);
             return ExitCode::FAILURE;
         }
         let file = std::fs::File::open(&input);
         if let Err(error) = file {
-            println!("Error: Could not open file: {}", error);
+            eprintln!("Error: Could not open file: {}", error);
             return ExitCode::FAILURE;
         }
         let mut file = file.unwrap();
         let mut buffer = String::new();
         if let Err(err) = file.read_to_string(&mut buffer) {
-            println!("Error: Could not read file: {}", err);
+            eprintln!("Error: Could not read file: {}", err);
             return ExitCode::FAILURE;
         }
         let tokens = tokenize(&buffer, &input);
         if let Err(err) = tokens {
-            println!("{}:{}", input, err);
+            eprintln!("{}:{}", input, err);
             return ExitCode::FAILURE;
         }
         let tokens = tokens.unwrap();
         let mut parser = Parser::new(tokens);
         let instructions = parser.parse();
         if let Err(err) = instructions {
-            println!("{}:{}", input, err);
+            eprintln!("{}:{}", input, err);
             return ExitCode::FAILURE;
         }
         let instructions = instructions.unwrap();
         if output == String::new() {
-            println!("Error: Output file not specified");
+            eprintln!("Error: Output file not specified");
             usage(program_name);
             return ExitCode::FAILURE;
         }
@@ -397,7 +447,7 @@ pub fn main() -> ExitCode {
         if let Ok(mut file) = res {
             let result = write_instructions(&mut file, instructions);
             if let Err(err) = result {
-                println!(
+                eprintln!(
                     "Error: Could not write instructions to output file: {}",
                     err
                 );
@@ -406,42 +456,42 @@ pub fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
         } else if let Err(err) = res {
-            println!("Error: Could not create output file: {}", err);
+            eprintln!("Error: Could not create output file: {}", err);
             return ExitCode::FAILURE;
         } else {
             return ExitCode::SUCCESS;
         }
     } else if option == "cbuild" {
         if &input == "" {
-            println!("Error: Input file not specified");
+            eprintln!("Error: Input file not specified");
             return ExitCode::FAILURE;
         }
         let start = Instant::now();
         if !std::path::Path::new(&input).exists() {
-            println!("The file '{}' does not exist.", input);
+            eprintln!("The file '{}' does not exist.", input);
             return ExitCode::FAILURE;
         }
         let file = std::fs::File::open(&input);
         if let Err(error) = file {
-            println!("Error: Could not open file: {}", error);
+            eprintln!("Error: Could not open file: {}", error);
             return ExitCode::FAILURE;
         }
         let mut file = file.unwrap();
         let mut buffer = String::new();
         if let Err(err) = file.read_to_string(&mut buffer) {
-            println!("Error: Could not read file: {}", err);
+            eprintln!("Error: Could not read file: {}", err);
             return ExitCode::FAILURE;
         }
         let tokens = tokenize(&buffer, &input);
         if let Err(err) = tokens {
-            println!("{}:{}", input, err);
+            eprintln!("{}:{}", input, err);
             return ExitCode::FAILURE;
         }
         let tokens = tokens.unwrap();
         let mut parser = Parser::new(tokens);
         let instructions = parser.parse();
         if let Err(err) = instructions {
-            println!("{}:{}", input, err);
+            eprintln!("{}:{}", input, err);
             return ExitCode::FAILURE;
         }
         let instructions = instructions.unwrap();
@@ -460,19 +510,19 @@ pub fn main() -> ExitCode {
         let nanoseconds = duration.subsec_micros();
         eprintln!("{}tasks in {}.{:09} seconds", Color::Green.bold().paint(" Finished "), seconds, nanoseconds);
         eprintln!("{}`{}`", Color::Green.bold().paint("  Running "), &canonicalize(input).unwrap().to_str().unwrap()[4..]);
-        let result = runtime.run(String::from("__main__"));
-        match result {
+        let result = runtime.run(String::from("__main__"), &start, timeout, &mut stdout, &mut stderr);
+        match task::block_on(result) {
             Ok(result) => {
-                println!("{}", vm::value_to_string(&result));
+                eprintln!("{}", vm::value_to_string(&result));
                 return ExitCode::SUCCESS;
             }
             Err(err) => {
-                println!(
+                eprintln!(
                     "Uncaught Runtime {}: {}",
                     Color::Red.paint("Error"),
                     Color::White.bold().paint(err)
                 );
-                println!(
+                eprintln!(
                     "{}",
                     runtime.get_opstack_backtrace(stack_backtrace_limit as usize)
                 );
@@ -480,7 +530,7 @@ pub fn main() -> ExitCode {
             }
         }
     } else {
-        println!("Unsupported command-line option: {}", option);
+        eprintln!("Unsupported command-line option: {}", option);
         return ExitCode::FAILURE;
     }
 }

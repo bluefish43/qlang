@@ -11,3 +11,6 @@ pub struct Class {
     pub public_properties: FxHashMap<String, (Value, Types)>,
     pub private_properties: FxHashMap<String, (Value, Types)>,
 }
+
+unsafe impl Send for Class {}
+unsafe impl Sync for Class {}

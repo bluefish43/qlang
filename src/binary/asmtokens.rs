@@ -76,7 +76,7 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                             "float",
                             "lfloat",
                             "string",
-                            "character",
+                            "char",
                             "boolean",
                             "list",
                             "tuple",

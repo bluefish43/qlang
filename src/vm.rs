@@ -3,6 +3,7 @@ use crate::{
     class::Class,
     function::{get_natives, Function, FunctionStruct, FunctionStructNoName},
     memory::allocator::GarbageCollector,
+    control::IOControllerW,
 };
 use ansi_term::Color;
 use ansi_term::Colour::{Blue, Green, White, Yellow};
@@ -11,11 +12,13 @@ use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
     fs::{canonicalize, File},
-    io::{stderr, stdin, stdout, Write, Read},
+    io::{stdin, Write, Read},
     os::raw::{c_char, c_double, c_float, c_int, c_long},
     path::PathBuf,
-    sync::Arc,
+    sync::Arc, time::Instant,
 };
+use parking_lot::Mutex;
+use async_recursion::async_recursion;
 
 pub struct VMErrorInfo {
     pub message: String,
@@ -179,6 +182,9 @@ pub enum RawValue {
     RawPtr(*const RawValue),
 }
 
+unsafe impl Send for RawValue {}
+unsafe impl Sync for RawValue {}
+
 #[derive(Clone, PartialEq)]
 pub enum Value {
     None,
@@ -200,6 +206,9 @@ pub enum Value {
     Byte(u8),
     Bytes(Vec<u8>),
 }
+
+unsafe impl Send for Value {}
+unsafe impl Sync for Value {}
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Types {
@@ -223,6 +232,9 @@ pub enum Types {
     Byte,
     Bytes,
 }
+
+unsafe impl Send for Types {}
+unsafe impl Sync for Types {}
 
 pub fn value_to_readable(val: &Value) -> String {
     match val {
@@ -523,7 +535,7 @@ pub enum Instruction {
 }
 
 pub struct VirtualMachine {
-    stack: Vec<Value>,
+    stack: Mutex<Vec<Value>>,
     labels: FxHashMap<String, u32>,
     instructions: VecDeque<Instruction>,
     pc: i64,
@@ -562,7 +574,7 @@ impl VirtualMachine {
         } else if let Ok(included) = res {
             includeds.push(included);
             Ok(Self {
-                stack: vec![],
+                stack: Mutex::new(vec![]),
                 args_stack: VecDeque::new(),
                 labels: FxHashMap::default(),
                 instructions: instructions.into(),
@@ -595,47 +607,44 @@ impl VirtualMachine {
     }
 
     pub fn get_opstack_backtrace(&self, mut limit: usize) -> String {
+        // Use a string builder to append the strings more efficiently
         let mut trace = String::new();
-
-        match std::env::var("Q_STACK_BACKTRACE_LIM") {
-            Ok(value) => {
-                if value.to_lowercase() == String::from("full") {
-                    let remaining_instructions = self.instructions.iter().skip(self.pc as usize);
-                    for instr in remaining_instructions {
-                        trace
-                            .push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
-                    }
-                } else if let Ok(lim) = u64::from_str_radix(&value, 10) {
-                    limit = lim as usize;
-                    let remaining_instructions =
-                        self.instructions.iter().skip(self.pc as usize).take(limit);
-                    for instr in remaining_instructions {
-                        trace
-                            .push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
-                    }
-                } else {
-                    if let Err(err) = u64::from_str_radix(&value, 10) {
-                        println!("Warning: Invalid enviroment variable Q_STACK_BACKTRACE_LIM value set: can be either a number or full\n\t--> Error parsing number: {}\n\t--> Using default value", err);
-                    }
-                    let remaining_instructions =
-                        self.instructions.iter().skip(self.pc as usize).take(limit);
-                    for instr in remaining_instructions {
-                        trace
-                            .push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
-                    }
+    
+        // Use a nested function to get the limit from the environment variable
+        fn get_limit_from_env(default_limit: usize) -> usize {
+            // Use the std::env::var function to get the value of the environment variable
+            match std::env::var("Q_STACK_BACKTRACE_LIM") {
+                // If the value is "full", return the maximum possible limit
+                Ok(value) if value.to_lowercase() == String::from("full") => usize::MAX,
+                // If the value is a valid number, return it as a usize
+                Ok(value) if u64::from_str_radix(&value, 10).is_ok() => u64::from_str_radix(&value, 10).unwrap() as usize,
+                // If the value is invalid, print a warning and return the default limit
+                Ok(_value) => {
+                    println!("Warning: Invalid enviroment variable Q_STACK_BACKTRACE_LIM value set: can be either a number or full\n\t--> Using default value");
+                    default_limit
                 }
-            }
-            _ => {
-                let remaining_instructions =
-                    self.instructions.iter().skip(self.pc as usize).take(limit);
-                for instr in remaining_instructions {
-                    trace.push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
-                }
+                // If the value is not set, return the default limit
+                Err(_) => default_limit,
             }
         }
-
+    
+        // Use the nested function to get the limit from the environment variable
+        limit = get_limit_from_env(limit);
+    
+        // Use an iterator to get the executed instructions and take the limit
+        let executed_instructions = self.instructions.iter().take(self.pc as usize).rev().take(limit);
+    
+        // Use a for loop to append the formatted and colorized instructions to the trace
+        for instr in executed_instructions {
+            trace.push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
+        }
+    
+        // Get the last instruction executed and append it to the trace
+        let last_instruction = &self.instructions[self.pc as usize];
+        trace.push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", last_instruction))));
+    
         trace
-    }
+    }            
 
     pub fn generate_error_info(&mut self, message: String) -> VMErrorInfo {
         VMErrorInfo {
@@ -744,16 +753,49 @@ impl VirtualMachine {
         self.gc.collect(&mut self.variables);
     }
 
-    pub fn run(&mut self, starts_module_as: String) -> Result<Value, String> {
+    #[async_recursion]
+    pub async fn run<'a, W1: std::io::Write + std::marker::Send, W2: std::io::Write + std::marker::Send>(
+        &mut self,
+        starts_module_as: String,
+        instant: &Instant,
+        timeout_milis: Option<usize>,
+        stdout_global: &mut IOControllerW<'a, W1>,
+        stderr_global: &mut IOControllerW<'a, W2>,
+    ) -> Result<Value, String> {
         self.gc.enter_scope();
         self.allocate_variable_in_root(String::from("__module__"), Value::String(starts_module_as));
         self.allocate_variable_in_root(
             String::from("__function__"),
             Value::String("__main__".to_string()),
         );
+        let local_instant = instant.clone();
+
+        let mut stack_max_size: i64 = 10000;
+
+        if let Ok(value) = std::env::var("Q_STACK_MAX_SIZE") {
+            let res = value.parse::<i64>();
+            if let Ok(value) = res {
+                stack_max_size = value;
+            } else if let Err(e) = res {
+                let res = write!(stdout_global, "Warning: Invalid enviroment variable Q_STACK_MAX_SIZE value set: must be an integer\n\t--> Error parsing number: {}\n\t--> Using default value 10.000", e);
+                if let Err(e) = res {
+                    return Err(format!("{}", e));
+                }
+            }
+        }
+
         while self.pc < (self.instructions.len() - 1).try_into().unwrap() {
             self.pc += 1;
+            let mut stack = self.stack.lock();
             //eprintln!("{:?}", &self.instructions[self.pc as usize]);
+            if stack_max_size <= self.stack.len() as i64 {
+                return Err(format!("Stack overflow: Max stack size ({}) overflowed.", stack_max_size));
+            } else if timeout_milis.is_some() {
+                let duration = local_instant.elapsed();
+                if duration.as_millis() > timeout_milis.unwrap() as u128 {
+                    return Err(format!("Timeout exceeded: timeout set to {}ms, program runned until {}ms", timeout_milis.unwrap() as u128, duration.as_millis()))
+                }
+            }
             match &self.instructions[self.pc as usize] {
                 Instruction::Declare(name, value) => {
                     if self.variables.contains_key(name) {
@@ -789,7 +831,7 @@ impl VirtualMachine {
                     match value_to_print {
                         Some(value) => match value {
                             Value::String(string) => {
-                                let result = stdout().write_all(string.as_bytes());
+                                let result = write!(stdout_global, "{}", string);
                                 if let Err(error) = result {
                                     if self.is_catching {
                                         self.stack.push(Value::Error(format!(
@@ -807,7 +849,7 @@ impl VirtualMachine {
                                 }
                             }
                             Value::Class(c) => {
-                                let result = write!(stdout(), "{:#?}", c);
+                                let result = write!(stdout_global, "{:#?}", c);
                                 if let Err(error) = result {
                                     if self.is_catching {
                                         self.stack.push(Value::Error(format!(
@@ -825,7 +867,7 @@ impl VirtualMachine {
                                 }
                             }
                             _ => {
-                                let result = stdout().write_all(value_to_string(&value).as_bytes());
+                                let result = write!(stdout_global, "{}", value_to_string(&value));
                                 if let Err(error) = result {
                                     if self.is_catching {
                                         self.stack.push(Value::Error(format!(
@@ -857,7 +899,7 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::Flush => {
-                    let result = stdout().flush();
+                    let result = stdout_global.flush();
                     if let Err(error) = result {
                         if self.is_catching {
                             self.stack
@@ -874,7 +916,7 @@ impl VirtualMachine {
                     match value_to_print {
                         Some(value) => match value {
                             Value::String(string) => {
-                                let result = stderr().write_all(string.as_bytes());
+                                let result = stderr_global.write_all(string.as_bytes());
                                 if let Err(error) = result {
                                     if self.is_catching {
                                         self.stack.push(Value::Error(format!(
@@ -892,7 +934,7 @@ impl VirtualMachine {
                                 }
                             }
                             _ => {
-                                let result = stderr().write_all(value_to_string(&value).as_bytes());
+                                let result = stderr_global.write_all(value_to_string(&value).as_bytes());
                                 if let Err(error) = result {
                                     if self.is_catching {
                                         self.stack.push(Value::Error(format!(
@@ -924,7 +966,7 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::FlushErr => {
-                    let result = stderr().flush();
+                    let result = stderr_global.flush();
                     if let Err(error) = result {
                         if self.is_catching {
                             self.stack
@@ -2312,7 +2354,7 @@ impl VirtualMachine {
                         } else if let Ok(ins) = instructions {
                             let mut new_runtime_proto = VirtualMachine::new(ins, &newpath.as_os_str().to_string_lossy().to_string())?;
                             new_runtime_proto.check_labels();
-                            new_runtime_proto.run(String::from("__module__"))?;
+                            new_runtime_proto.run(String::from("__module__"), &local_instant, None, stdout_global, stderr_global).await?;
                             self.functions
                                 .extend(new_runtime_proto.functions.into_iter());
                             self.gc.absorb(&mut new_runtime_proto.gc);
@@ -2427,7 +2469,10 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::DebuggingPrintStack => {
-                    eprintln!("{:?}", self.stack);
+                    let result = stderr_global.write_fmt(format_args!("{:?}", self.stack));
+                    if let Err(err) = result {
+                        return Err(format!("Could not print stack (debug): {}", err));
+                    }
                 }
                 Instruction::MemoryReadVolatile(loc) => {
                     if let Value::PtrWrapper(ptr) = loc {
@@ -3960,7 +4005,6 @@ impl VirtualMachine {
                     let mut has_defined_static_methods = false;
                     while let Some(instruction) = self.instructions.get(self.pc as usize) {
                         self.pc += 1;
-                        eprintln!("{:?}", instruction);
                         match instruction {
                             Instruction::PublicFields => {
                                 if has_defined_public_properties {
@@ -4239,7 +4283,6 @@ impl VirtualMachine {
                             self.instructions.push_back(Instruction::InvokeStaticMethod(String::from("__new__")));
                             self.instructions.push_back(Instruction::InvokeStaticMethod(String::from("__new__")));
                             self.instructions.append(&mut other_part);
-                            eprintln!("{:#?}", self.instructions)
                         }
                         None => {
                             if self.is_catching {
@@ -4598,7 +4641,6 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::InvokeStaticMethod(method) => {
-                    eprintln!("We got here!");
                     match self.current_object {
                         Some(classptr) => {
                             let reference = unsafe { classptr.as_mut().unwrap() };
@@ -4995,3 +5037,6 @@ impl VirtualMachine {
         Ok(Value::None)
     }
 }
+
+unsafe impl Send for VirtualMachine {}
+unsafe impl Sync for VirtualMachine {}

@@ -367,6 +367,10 @@ impl Parser {
                         let value = self.parse_string()?;
                         Ok(Value::String(value))
                     }
+                    "Error" => {
+                        let value = self.parse_string()?;
+                        Ok(Value::Error(value))
+                    }
                     "char" => {
                         let value = self.parse_char()?;
                         Ok(Value::Character(value))
