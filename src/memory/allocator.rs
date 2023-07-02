@@ -118,17 +118,15 @@ impl GarbageCollector {
 
         match object {
             VMValue::PtrWrapper(reference) => {
-                if let Some(reference_ptr) = unsafe {
+                let reference_ptr = unsafe {
                     reference
-                        .as_ref()
-                        .map(|r| r as *const VMValue as *mut VMValue)
-                } {
-                    let reference_ptr = unsafe { NonNull::new_unchecked(reference_ptr) };
-                    if let Some(color) = colors.get_mut(&reference_ptr) {
-                        if *color == Color::White {
-                            *color = Color::Gray;
-                            stack.push(reference_ptr);
-                        }
+                        .as_mut() as *mut crate::Value
+                };
+                let reference_ptr = unsafe { NonNull::new_unchecked(reference_ptr) };
+                if let Some(color) = colors.get_mut(&reference_ptr) {
+                    if *color == Color::White {
+                        *color = Color::Gray;
+                        stack.push(reference_ptr);
                     }
                 }
             }
@@ -196,6 +194,9 @@ impl GarbageCollector {
         for block in &mut self.blocks {
             for &object_ptr in &block.objects {
                 unsafe {
+                    eprintln!("Deallocating block {:?}", object_ptr);
+                    let actual_value = std::ptr::read_volatile(object_ptr.as_ptr());
+                    eprintln!("Actual value: {:#?}", actual_value);
                     let _ = Box::from_raw(object_ptr.as_ptr());
                 }
             }

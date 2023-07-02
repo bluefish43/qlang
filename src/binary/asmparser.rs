@@ -289,6 +289,153 @@ impl Parser {
                     "wbtfh" => {
                         instructions.push(Instruction::WriteBytesToFileHandle);
                     }
+                    "svr" => {
+                        instructions.push(Instruction::SequestrateVariables);
+                    }
+                    "rsvr" => {
+                        instructions.push(Instruction::RestoreSequestratedVariables);
+                    }
+                    "grfhs" => {
+                        instructions.push(Instruction::GetReadFileHandleStack);
+                    }
+                    "gwfhs" => {
+                        instructions.push(Instruction::GetWriteFileHandleStack);
+                    }
+                    "cfhs" => {
+                        instructions.push(Instruction::CloseFileHandleStack);
+                    }
+                    "rffhs" => {
+                        instructions.push(Instruction::ReadFromFileHandleStack);
+                    }
+                    "pfphs" => {
+                        instructions.push(Instruction::PushFileHandlePointerStack);
+                    }
+                    "dfclass" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::DefineClass(name));
+                    }
+                    "pubfld" => {
+                        instructions.push(Instruction::PublicFields);
+                    }
+                    "dfield" => {
+                        let name = self.parse_identifier()?;
+                        let type_ = self.parse_type()?;
+                        instructions.push(Instruction::DefineField(name, type_));
+                    }
+                    "epubfl" => {
+                        instructions.push(Instruction::EndPublicFields);
+                    }
+                    "prfl" => {
+                        instructions.push(Instruction::PrivateFields);
+                    }
+                    "eprfl" => {
+                        instructions.push(Instruction::EndPrivateFields);
+                    }
+                    "lftpb" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::LoadFromThisPublic(name));
+                    }
+                    "lftpr" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::LoadFromThisPrivate(name));
+                    }
+                    "settpb" => {
+                        let name = self.parse_identifier()?;
+                        let value = self.parse_value()?;
+                        instructions.push(Instruction::SetThisPublic(name, value));
+                    }
+                    "settpr" => {
+                        let name = self.parse_identifier()?;
+                        let value = self.parse_value()?;
+                        instructions.push(Instruction::SetThisPrivate(name, value));
+                    }
+                    "stspb" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::SetThisStackPublic(name));
+                    }
+                    "stspr" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::SetThisStackPrivate(name));
+                    }
+                    "clsmdef" => {
+                        let name = self.parse_identifier()?;
+                        let args = self.parse_function_arguments()?;
+                        let returns = self.parse_type()?;
+                        instructions.push(Instruction::ClassMethodDefinition(name, args, returns));
+                    }
+                    "pubmet" => {
+                        instructions.push(Instruction::PublicMethods);
+                    }
+                    "epubmet" => {
+                        instructions.push(Instruction::EndPublicMethods);
+                    }
+                    "privmet" => {
+                        instructions.push(Instruction::PrivateMethods);
+                    }
+                    "eprivmet" => {
+                        instructions.push(Instruction::EndPrivateMethods);
+                    }
+                    "stmt" => {
+                        instructions.push(Instruction::StaticMethods);
+                    }
+                    "estmt" => {
+                        instructions.push(Instruction::EndStaticMethods);
+                    }
+                    "inh" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::InheritFrom(name));
+                    }
+                    "constructor" => {
+                        let args = self.parse_function_arguments()?;
+                        let returns = self.parse_type()?;
+                        instructions.push(Instruction::ConstructorFunctionDefinition(args, returns));
+                    }
+                    "instan" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::Instantiate(name));
+                    }
+                    "ivkstmt" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::InvokeStaticMethod(name));
+                    }
+                    "ivkpubmt" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::InvokePublicMethod(name));
+                    }
+                    "ivkprivmt" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::InvokePrivateMethod(name));
+                    }
+                    "sectobj" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::SetCurrentObject(name));
+                    }
+                    "eclass" => {
+                        instructions.push(Instruction::EndClass);
+                    }
+                    "pushcobj" => {
+                        instructions.push(Instruction::PushCurrentObject);
+                    }
+                    "mkcobjnone" => {
+                        instructions.push(Instruction::MakeCurrentObjectNone);
+                    }
+                    "allcargslcl" => {
+                        instructions.push(Instruction::AllocArgsToLocal);
+                    }
+                    "defcor" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::DefineCoroutine(name));
+                    }
+                    "endcor" => {
+                        instructions.push(Instruction::EndCoroutine);
+                    }
+                    "runcor" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::RunCoroutine(name));
+                    }
+                    "awaitcor" => {
+                        instructions.push(Instruction::AwaitCoroutineFutureStack);
+                    }
                     _ => {
                         return Err(format!(
                             "{}:{}->{}: Invalid keyword '{}'",

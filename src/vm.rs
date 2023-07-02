@@ -8,6 +8,7 @@ use crate::{
 use ansi_term::Color;
 use ansi_term::Colour::{Blue, Green, White, Yellow};
 use fxhash::FxHashMap;
+use std::cell::RefCell;
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
@@ -15,15 +16,57 @@ use std::{
     io::{stdin, Write, Read},
     os::raw::{c_char, c_double, c_float, c_int, c_long},
     path::PathBuf,
-    sync::Arc, time::Instant,
+    sync::Arc, time::Instant, ptr::NonNull,
 };
 use parking_lot::Mutex;
 use async_recursion::async_recursion;
+use async_std::task;
+use num_traits::identities::Zero;
 
 pub struct VMErrorInfo {
     pub message: String,
     pub backtrace: String,
     pub on_instruction: usize,
+}
+
+pub trait IntoValue {
+    fn into_value(&self) -> Value;
+}
+
+impl IntoValue for i32 {
+    fn into_value(&self) -> Value {
+        return Value::Int(*self)
+    }
+}
+
+impl IntoValue for i64 {
+    fn into_value(&self) -> Value {
+        return Value::BigInt(*self)
+    }
+}
+
+impl IntoValue for f32 {
+    fn into_value(&self) -> Value {
+        return Value::LFloat(*self)
+    }
+}
+
+impl IntoValue for f64 {
+    fn into_value(&self) -> Value {
+        return Value::Float(*self)
+    }
+}
+
+impl IntoValue for String {
+    fn into_value(&self) -> Value {
+        return Value::String(self.clone())
+    }
+}
+
+impl IntoValue for &str {
+    fn into_value(&self) -> Value {
+        return Value::String(self.to_string())
+    }
 }
 
 fn colorize_string(input: &str) -> String {
@@ -128,11 +171,8 @@ pub fn value_to_raw(value: Value) -> RawValue {
             RawValue::Error(c_str.into_raw())
         }
         Value::PtrWrapper(p) => {
-            if p.is_null() {
-                return RawValue::RawPtr(std::ptr::null());
-            }
             return RawValue::RawPtr(
-                &value_to_raw(unsafe { p.as_ref().unwrap().clone() }) as *const RawValue
+                &value_to_raw(unsafe { p.as_ref().clone() }) as *const RawValue
             );
         }
         _ => panic!("Unsupported Value variant"),
@@ -182,6 +222,37 @@ pub enum RawValue {
     RawPtr(*const RawValue),
 }
 
+impl IntoValue for RawValue {
+    fn into_value(&self) -> Value {
+        match self {
+            RawValue::None => Value::None,
+            RawValue::Int(i) => Value::Int(*i),
+            RawValue::BigInt(i) => Value::BigInt(i64::from(*i)),
+            RawValue::Float(f) => Value::Float(*f),
+            RawValue::LFloat(f) => Value::LFloat(*f),
+            RawValue::String(s) => {
+                let c_str = unsafe { std::ffi::CString::from_raw(*s as *mut c_char) };
+                let string_value = match c_str.into_string() {
+                    Ok(s) => s,
+                    Err(_) => panic!("Failed to convert CString to string"),
+                };
+                Value::String(string_value)
+            }
+            RawValue::Character(c) => Value::Character(*c as u8 as char),
+            RawValue::Boolean(b) => Value::Boolean(*b),
+            RawValue::Error(e) => {
+                let c_str = unsafe { std::ffi::CString::from_raw(*e as *mut c_char) };
+                let error_value = match c_str.into_string() {
+                    Ok(s) => s,
+                    Err(_) => panic!("Failed to convert CString to error string"),
+                };
+                Value::Error(error_value)
+            }
+            RawValue::RawPtr(_) => panic!("Cannot convert raw pointer to common pointer"),
+        }
+    }
+}
+
 unsafe impl Send for RawValue {}
 unsafe impl Sync for RawValue {}
 
@@ -200,11 +271,36 @@ pub enum Value {
     Tuple(Vec<Value>),
     Uninitialized,
     Error(String),
-    PtrWrapper(*mut Value),
+    PtrWrapper(NonNull<Value>),
     Function(*const Function),
     FileHandle((*mut File, bool)),
     Byte(u8),
     Bytes(Vec<u8>),
+    Mutex(MutexEQWrapper<Value>),
+    Future(usize),
+}
+
+#[derive(Clone)]
+pub struct MutexEQWrapper<T>(pub Arc<Mutex<T>>);
+
+impl<T> PartialEq for MutexEQWrapper<T> {
+    fn eq(&self, _: &Self) -> bool {
+        false
+    }
+}
+
+impl<T> std::ops::Deref for MutexEQWrapper<T> {
+    type Target = Arc<Mutex<T>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for MutexEQWrapper<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 unsafe impl Send for Value {}
@@ -231,6 +327,7 @@ pub enum Types {
     FileHandle,
     Byte,
     Bytes,
+    Mutex,
 }
 
 unsafe impl Send for Types {}
@@ -256,6 +353,8 @@ pub fn value_to_readable(val: &Value) -> String {
         Value::FileHandle(f) => format!("<file Type at {:?}>", f),
         Value::Byte(b) => format!("{}", b),
         Value::Bytes(b) => format!("{:?}", b),
+        Value::Mutex(m) => format!("<Mutex Type at {:?}>", m.data_ptr()),
+        Value::Future(_) => format!("<Future Type at unknown>"),
     }
 }
 
@@ -279,6 +378,8 @@ pub fn value_to_typeof(val: &Value) -> String {
         Value::FileHandle(_) => format!("file"),
         Value::Byte(_) => format!("byte"),
         Value::Bytes(_) => format!("bytes"),
+        Value::Mutex(_) => format!("Mutex"),
+        Value::Future(..) => format!("Future"),
     }
 }
 
@@ -304,11 +405,7 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Error(e) => format!("Error: {}", e),
         Value::Class(p) => format!("<class Type at {:?}>", p as *const Class),
         Value::PtrWrapper(ptr) => {
-            if ptr.is_null() {
-                "<NULLPTR>".to_string()
-            } else {
-                format!("{:#?}", ptr)
-            }
+            format!("{:#?}", ptr)
         }
         Value::Function(f) => {
             format!("<function Type at {:?}>", f)
@@ -318,6 +415,8 @@ pub fn value_to_string(val: &Value) -> String {
         }
         Value::Byte(b) => format!("{}", b),
         Value::Bytes(b) => format!("{:?}", b),
+        Value::Mutex(m) => format!("<Mutex Type at {:?}>", m.data_ptr()),
+        Value::Future(_) => format!("<Future Type at unknown>"),
     }
 }
 
@@ -532,15 +631,20 @@ pub enum Instruction {
     MakeCurrentObjectNone,
 
     AllocArgsToLocal,
+
+    DefineCoroutine(String),
+    EndCoroutine,
+    RunCoroutine(String),
+    AwaitCoroutineFutureStack,
 }
 
 pub struct VirtualMachine {
-    stack: Mutex<Vec<Value>>,
-    labels: FxHashMap<String, u32>,
-    instructions: VecDeque<Instruction>,
+    stack: Arc<Mutex<Vec<Value>>>,
+    labels: RefCell<FxHashMap<String, u32>>,
+    pub instructions: VecDeque<Instruction>,
     pc: i64,
-    pub variables: FxHashMap<String, *const Value>,
-    gc: GarbageCollector,
+    pub variables: RefCell<FxHashMap<String, *const Value>>,
+    gc: RefCell<GarbageCollector>,
     pub functions: FxHashMap<String, (Function, bool)>,
     pub classes: FxHashMap<String, Class>,
     pub included: Vec<PathBuf>,
@@ -562,6 +666,10 @@ pub struct VirtualMachine {
     current_object: Option<*mut Class>,
 
     args_to_alloc: Vec<FxHashMap<String, Value>>,
+
+    coroutines: FxHashMap<String, Vec<Instruction>>,
+
+    running_coroutines: Vec<Option<std::thread::JoinHandle<std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>>>>,
 }
 
 impl VirtualMachine {
@@ -574,20 +682,20 @@ impl VirtualMachine {
         } else if let Ok(included) = res {
             includeds.push(included);
             Ok(Self {
-                stack: Mutex::new(vec![]),
+                stack: Arc::new(Mutex::new(vec![])),
                 args_stack: VecDeque::new(),
-                labels: FxHashMap::default(),
+                labels: RefCell::new(FxHashMap::default()),
                 instructions: instructions.into(),
                 pc: -1,
                 loop_addresses: Vec::new(),
-                variables: FxHashMap::default(),
+                variables: RefCell::new(FxHashMap::default()),
                 functions: FxHashMap::default(),
                 classes: FxHashMap::default(),
                 included: includeds,
                 is_catching: false,
                 returns_to: vec![],
                 block_len: 0,
-                gc: GarbageCollector::new(),
+                gc: RefCell::new(GarbageCollector::new()),
                 stored_closures: Vec::new(),
                 file_handles: VecDeque::new(),
                 file_handles_names: VecDeque::new(),
@@ -600,9 +708,45 @@ impl VirtualMachine {
                 expected_return_types: Vec::new(),
                 current_object: None,
                 args_to_alloc: Vec::new(),
+                coroutines: FxHashMap::default(),
+
+                running_coroutines: Vec::new(),
             })
         } else {
             unreachable!()
+        }
+    }
+
+    pub fn thread_cloned(&self) -> Self {
+        Self {
+            stack: Arc::new(Mutex::new(vec![])),
+            args_stack: VecDeque::new(),
+            labels: RefCell::new(FxHashMap::default()),
+            instructions: self.instructions.clone(),
+            pc: -1,
+            loop_addresses: Vec::new(),
+            variables: RefCell::new(FxHashMap::default()),
+            functions: self.functions.clone(),
+            classes: self.classes.clone(),
+            included: self.included.clone(),
+            is_catching: false,
+            returns_to: vec![],
+            block_len: 0,
+            gc: RefCell::new(GarbageCollector::new()),
+            stored_closures: Vec::new(),
+            file_handles: VecDeque::new(),
+            file_handles_names: VecDeque::new(),
+            last_runned: String::new(),
+            recursive_level: 0,
+            max_recursiveness_level: self.max_recursiveness_level,
+            handles_recursion_count: self.handles_recursion_count,
+            sequestrated_variables: Vec::new(),
+            stack_before: Vec::new(),
+            expected_return_types: Vec::new(),
+            current_object: None,
+            args_to_alloc: Vec::new(),
+            coroutines: FxHashMap::default(),
+            running_coroutines: Vec::new(),
         }
     }
 
@@ -663,13 +807,14 @@ impl VirtualMachine {
     }
 
     pub fn check_labels(&mut self) {
-        let mut pos = -1;
+        let mut pos: i32 = -1;
         for instruction in self.instructions.iter_mut() {
             pos += 1;
             assert!(pos > -1);
             match instruction {
                 Instruction::Label(name) => {
-                    self.labels.insert(name.clone(), pos as u32);
+                    let mut labels = self.labels.borrow_mut();
+                    labels.insert(name.clone(), pos as u32);
                     continue;
                 }
                 _ => continue,
@@ -690,7 +835,7 @@ impl VirtualMachine {
         }
     }
 
-    pub fn check_labels_from_pc(&mut self, length: usize) {
+    pub fn check_labels_from_pc(&self, length: usize) {
         let mut pos = self.pc;
         for instruction in self.instructions.iter().skip(self.pc as usize - 1) {
             pos += 1;
@@ -699,7 +844,8 @@ impl VirtualMachine {
             }
             match instruction {
                 Instruction::Label(name) => {
-                    self.labels.insert(name.clone(), pos as u32);
+                    let mut labels = self.labels.borrow_mut();
+                    labels.insert(name.clone(), pos as u32);
                     continue;
                 }
                 _ => continue,
@@ -722,53 +868,71 @@ impl VirtualMachine {
         }
     }
 
-    pub fn allocate_variable(&mut self, name: String, value: Value) {
-        let ptr = self.gc.allocate_in_scope(value);
-        self.variables.insert(name, ptr.as_ptr());
+    pub fn allocate_variable(&self, name: String, value: Value) {
+        let mut gc = self.gc.borrow_mut();
+        let ptr = gc.allocate_in_scope(value);
+        let mut variables = self.variables.borrow_mut();
+        variables.insert(name, ptr.as_ptr());
     }
 
-    pub fn allocate_variable_in_root(&mut self, name: String, value: Value) {
-        let ptr = self.gc.allocate(value);
-        self.variables.insert(name, ptr.as_ptr());
+    pub fn allocate_variable_in_root(&self, name: String, value: Value) {
+        let mut gc = self.gc.borrow_mut();
+        let ptr = gc.allocate(value);
+        let mut variables = self.variables.borrow_mut();
+        variables.insert(name, ptr.as_ptr());
     }
 
     pub fn get_variable(&self, name: &str) -> Option<&Value> {
-        if let Some(ptr) = self.variables.get(name) {
+        let variables = self.variables.borrow();
+        if let Some(ptr) = variables.get(name) {
             Some(unsafe { &**ptr })
         } else {
             None
         }
     }
 
-    pub fn set_variable(&mut self, name: String, value: Value) {
-        if let Some(ptr) = self.variables.get_mut(&name) {
+    pub fn set_variable(&self, name: String, value: Value) {
+        let mut variables = self.variables.borrow_mut();
+        if let Some(ptr) = variables.get_mut(&name) {
             unsafe { *(*ptr as *mut Value) = value };
         } else {
-            let ptr = self.gc.allocate_in_scope(value);
-            self.variables.insert(name, ptr.as_ptr());
+            let mut gc = self.gc.borrow_mut();
+            let ptr = gc.allocate_in_scope(value);
+            variables.insert(name, ptr.as_ptr());
         }
     }
 
-    pub fn collect_garbage(&mut self) {
-        self.gc.collect(&mut self.variables);
+    pub fn collect_garbage(&self) {
+        let mut gc = self.gc.borrow_mut();
+        gc.collect(&mut *self.variables.borrow_mut());
+    }
+
+    pub fn enter_scope(&self) {
+        let mut gc = self.gc.borrow_mut();
+        gc.enter_scope();
+    }
+
+    pub fn leave_scope(&self) {
+        let mut gc = self.gc.borrow_mut();
+        gc.leave_scope();
     }
 
     #[async_recursion]
     pub async fn run<'a, W1: std::io::Write + std::marker::Send, W2: std::io::Write + std::marker::Send>(
         &mut self,
-        starts_module_as: String,
-        instant: &Instant,
+        starts_module_as: Arc<String>,
+        instant: &'static Arc<Instant>,
         timeout_milis: Option<usize>,
-        stdout_global: &mut IOControllerW<'a, W1>,
-        stderr_global: &mut IOControllerW<'a, W2>,
+        stdout_global: &'static Arc<Mutex<&mut IOControllerW<'a, W1>>>,
+        stderr_global: &'static Arc<Mutex<&mut IOControllerW<'a, W2>>>,
     ) -> Result<Value, String> {
-        self.gc.enter_scope();
-        self.allocate_variable_in_root(String::from("__module__"), Value::String(starts_module_as));
+        self.enter_scope();
+        self.allocate_variable_in_root(String::from("__module__"), Value::String(starts_module_as.to_string()));
         self.allocate_variable_in_root(
             String::from("__function__"),
             Value::String("__main__".to_string()),
         );
-        let local_instant = instant.clone();
+        let local_instant = RefCell::new(instant.clone());
 
         let mut stack_max_size: i64 = 10000;
 
@@ -777,6 +941,7 @@ impl VirtualMachine {
             if let Ok(value) = res {
                 stack_max_size = value;
             } else if let Err(e) = res {
+                let mut stdout_global = stdout_global.lock();
                 let res = write!(stdout_global, "Warning: Invalid enviroment variable Q_STACK_MAX_SIZE value set: must be an integer\n\t--> Error parsing number: {}\n\t--> Using default value 10.000", e);
                 if let Err(e) = res {
                     return Err(format!("{}", e));
@@ -786,21 +951,26 @@ impl VirtualMachine {
 
         while self.pc < (self.instructions.len() - 1).try_into().unwrap() {
             self.pc += 1;
+            
             let mut stack = self.stack.lock();
+
             //eprintln!("{:?}", &self.instructions[self.pc as usize]);
-            if stack_max_size <= self.stack.len() as i64 {
+            if stack_max_size <= stack.len() as i64 {
                 return Err(format!("Stack overflow: Max stack size ({}) overflowed.", stack_max_size));
             } else if timeout_milis.is_some() {
-                let duration = local_instant.elapsed();
+                let borrowed = local_instant.borrow().clone();
+                let duration = borrowed.elapsed();
                 if duration.as_millis() > timeout_milis.unwrap() as u128 {
                     return Err(format!("Timeout exceeded: timeout set to {}ms, program runned until {}ms", timeout_milis.unwrap() as u128, duration.as_millis()))
                 }
             }
+            eprintln!("{:?}",&self.instructions[self.pc as usize]);
             match &self.instructions[self.pc as usize] {
                 Instruction::Declare(name, value) => {
-                    if self.variables.contains_key(name) {
+                    let variables = self.variables.borrow();
+                    if variables.contains_key(name) {
                         if self.is_catching {
-                            self.stack.push(Value::Error(format!("Redefinition of variable: Tried to redefine the variable {}, which is already defined.", name)));
+                            stack.push(Value::Error(format!("Redefinition of variable: Tried to redefine the variable {}, which is already defined.", name)));
                             continue;
                         } else {
                             return Err(format!("Redefinition of variable: Tried to redefine the variable {}, which is already defined.", name));
@@ -813,11 +983,11 @@ impl VirtualMachine {
                     let input = stdin().read_line(&mut buffer);
                     match input {
                         Ok(_) => {
-                            self.stack.push(Value::String(buffer));
+                            stack.push(Value::String(buffer));
                         }
                         Err(e) => {
                             if self.is_catching {
-                                self.stack
+                                stack
                                     .push(Value::Error(format!("Could not get input: {}", e)));
                                 continue;
                             } else {
@@ -827,14 +997,15 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::Print => {
-                    let value_to_print = self.stack.pop();
+                    let value_to_print = stack.pop();
                     match value_to_print {
                         Some(value) => match value {
                             Value::String(string) => {
+                                let mut stdout_global = stdout_global.lock();
                                 let result = write!(stdout_global, "{}", string);
                                 if let Err(error) = result {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Could not write to stdout: {}",
                                             error
                                         )));
@@ -849,10 +1020,11 @@ impl VirtualMachine {
                                 }
                             }
                             Value::Class(c) => {
+                                let mut stdout_global = stdout_global.lock();
                                 let result = write!(stdout_global, "{:#?}", c);
                                 if let Err(error) = result {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Could not write to stdout: {}",
                                             error
                                         )));
@@ -867,10 +1039,11 @@ impl VirtualMachine {
                                 }
                             }
                             _ => {
+                                let mut stdout_global = stdout_global.lock();
                                 let result = write!(stdout_global, "{}", value_to_string(&value));
                                 if let Err(error) = result {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Could not write to stdout: {}",
                                             error
                                         )));
@@ -887,7 +1060,7 @@ impl VirtualMachine {
                         },
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(
+                                stack.push(Value::Error(
                                     "Could not write to stdout: The stack is empty".to_string(),
                                 ))
                             } else {
@@ -899,10 +1072,11 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::Flush => {
+                    let mut stdout_global = stdout_global.lock();
                     let result = stdout_global.flush();
                     if let Err(error) = result {
                         if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(format!("Could not flush stdout: {}", error)))
                         } else {
                             return Err(format!("Could not flush stdout: {}", error));
@@ -912,14 +1086,15 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::PrintErr => {
-                    let value_to_print = self.stack.pop();
+                    let value_to_print = stack.pop();
                     match value_to_print {
                         Some(value) => match value {
                             Value::String(string) => {
+                                let mut stderr_global = stderr_global.lock();
                                 let result = stderr_global.write_all(string.as_bytes());
                                 if let Err(error) = result {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Could not write to stderr: {}",
                                             error
                                         )))
@@ -934,10 +1109,11 @@ impl VirtualMachine {
                                 }
                             }
                             _ => {
+                                let mut stderr_global = stderr_global.lock();
                                 let result = stderr_global.write_all(value_to_string(&value).as_bytes());
                                 if let Err(error) = result {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Could not write to stderr: {}",
                                             error
                                         )))
@@ -954,7 +1130,7 @@ impl VirtualMachine {
                         },
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(
+                                stack.push(Value::Error(
                                     "Could not write to stderr: The stack is empty".to_string(),
                                 ))
                             } else {
@@ -966,10 +1142,11 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::FlushErr => {
+                    let mut stderr_global = stderr_global.lock();
                     let result = stderr_global.flush();
                     if let Err(error) = result {
                         if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(format!("Could not flush stderr: {}", error)))
                         } else {
                             return Err(format!("Could not flush stderr: {}", error));
@@ -979,9 +1156,10 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::Assign(name, value) => {
-                    if !self.variables.contains_key(name) {
+                    let variables = self.variables.borrow();
+                    if !variables.contains_key(name) {
                         if self.is_catching {
-                            self.stack.push(Value::Error(format!(
+                            stack.push(Value::Error(format!(
                                 "Cannot assign to undefined variable {}",
                                 name
                             )))
@@ -994,9 +1172,10 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::AssignTop(name) => {
-                    if !self.variables.contains_key(name) {
+                    let variables = self.variables.borrow();
+                    if !variables.contains_key(name) {
                         if self.is_catching {
-                            self.stack.push(Value::Error(format!(
+                            stack.push(Value::Error(format!(
                                 "Cannot assign to undefined variable {}",
                                 name
                             )))
@@ -1004,12 +1183,12 @@ impl VirtualMachine {
                             return Err(format!("Cannot assign to undefined variable {}", name));
                         }
                     } else {
-                        let value = self.stack.pop();
+                        let value = stack.pop();
                         if let Some(value) = value {
                             self.set_variable(name.clone(), value.clone());
                             continue;
                         } else if self.is_catching {
-                            self.stack.push(Value::Error(
+                            stack.push(Value::Error(
                                 "Cannot assign to {} from the stack because the stack is empty"
                                     .to_string(),
                             ))
@@ -1025,20 +1204,21 @@ impl VirtualMachine {
                     if !self.is_catching {
                         return Err(err.to_string());
                     } else {
-                        self.stack.push(Value::Error(err.clone()))
+                        stack.push(Value::Error(err.clone()))
                     }
                 }
                 Instruction::Push(val) => {
-                    self.stack.push(val.clone());
+                    stack.push(val.clone());
                     continue;
                 }
                 Instruction::Load(name) => {
-                    let value = self.variables.get(name);
+                    let variables = self.variables.borrow();
+                    let value = variables.get(name);
                     if let Some(value) = value {
-                        self.stack.push(unsafe { std::ptr::read_volatile(*value) });
+                        stack.push(unsafe { std::ptr::read_volatile(*value) });
                         continue;
                     } else if self.is_catching {
-                        self.stack.push(Value::Error(format!(
+                        stack.push(Value::Error(format!(
                             "Cannot load undefined variable {}",
                             name
                         )));
@@ -1047,10 +1227,11 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::Jump(label) => {
-                    if let Some(line) = self.labels.get(label) {
+                    let labels = self.labels.borrow();
+                    if let Some(line) = labels.get(label) {
                         self.pc = *line as i64;
                     } else if self.is_catching {
-                        self.stack.push(Value::Error(format!(
+                        stack.push(Value::Error(format!(
                             "Cannot jump to undefined label {}",
                             label
                         )));
@@ -1059,13 +1240,14 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::JumpStack(label) => {
-                    if let Some(val) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
                         match val {
                             Value::Boolean(b) if b => {
-                                if let Some(line) = self.labels.get(label) {
+                                let labels = self.labels.borrow();
+                                if let Some(line) = labels.get(label) {
                                     self.pc = *line as i64;
                                 } else if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
+                                    stack.push(Value::Error(format!(
                                         "Cannot jump to undefined label {}",
                                         label
                                     )));
@@ -1079,532 +1261,492 @@ impl VirtualMachine {
                             _ => continue,
                         }
                     } else if self.is_catching {
-                        self.stack.push(Value::Error(format!("Cannot jump to label {} according to the top stack value because the stack is empty", label)));
+                        stack.push(Value::Error(format!("Cannot jump to label {} according to the top stack value because the stack is empty", label)));
                     } else {
                         return Err(format!("Cannot jump to label {} according to the top stack value because the stack is empty", label));
                     }
                 }
                 Instruction::Add => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Int(i1) => match val2 {
                                     Value::Int(i) => {
-                                        self.stack.push(Value::Int(i1 + i));
+                                        let (result, overflow) = i.overflowing_add(i1);
+                                        if overflow {
+                                            if self.is_catching {
+                                                stack.push(Value::Error("Integer addition overflow".to_string()));
+                                            } else {
+                                                return Err("Integer addition overflow".to_string());
+                                            }
+                                        } else {
+                                            stack.push(Value::Int(result));
+                                        }
+                                    }
+                                    Value::Float(f) => {
+                                        stack.push(Value::Float(f + i1 as f64));
+                                    }
+                                    Value::BigInt(b) => {
+                                        let b1 = Value::BigInt(i1 as i64);
+                                        stack.push(Value::BigInt(&b + i1 as i64));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::BigInt(i1) => match val2 {
-                                    Value::BigInt(i) => {
-                                        self.stack.push(Value::BigInt(i1 + i));
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
-                                        } else {
-                                            return Err(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
-                                        }
-                                    }
-                                },
+                                }
                                 Value::Float(f1) => match val2 {
                                     Value::Float(f) => {
-                                        self.stack.push(Value::Float(f1 + f));
+                                        stack.push(Value::Float(f + f1));
+                                    }
+                                    Value::Int(i) => {
+                                        stack.push(Value::Float(i as f64 + f1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::LFloat(f1) => match val2 {
-                                    Value::LFloat(f) => {
-                                        self.stack.push(Value::LFloat(f1 + f));
+                                }
+                                Value::BigInt(b1) => match val2 {
+                                    Value::BigInt(b) => {
+                                        stack.push(Value::BigInt(&b + &b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::String(s1) => match val2 {
-                                    Value::String(s2) => {
-                                        self.stack.push(Value::String(s2 + &s1));
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
-                                                    "Addition is not supported between the types {} and {}",
-                                                    "string",
-                                                    value_to_readable(&val2)
-                                                )));
-                                        } else {
-                                            return Err(format!(
-                                                    "Addition is not supported between the types {} and {}",
-                                                    "string",
-                                                    value_to_readable(&val2)
-                                                ));
-                                        }
-                                    }
-                                },
+                                }
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the addition operator in a non-numeric value {}", value_to_string(&val))));
+                                        stack.push(Value::Error(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                     } else {
-                                        return Err(format!("Cannot apply the addition operator in a non-numeric value {}", value_to_string(&val)));
+                                        return Err(format!("Addition is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                     }
                                 }
                             }
-                        } else if self.is_catching {
-                            self.stack
-                                .push(Value::Error(String::from("Not enough operands")));
                         } else {
-                            return Err(String::from("Not enough operands"));
+                            if self.is_catching {
+                                stack.push(val);
+                            } else {
+                                return Err("Not enough values on the stack for addition operation".to_string());
+                            }
                         }
-                    } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        if self.is_catching {
+                            stack.push(Value::Error("No value on the stack for addition operation".to_string()));
+                        } else {
+                            return Err("No value on the stack for addition operation".to_string());
+                        }
                     }
                 }
+                
                 Instruction::Sub => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Int(i1) => match val2 {
                                     Value::Int(i) => {
-                                        self.stack.push(Value::Int(i - i1));
+                                        let (result, overflow) = i.overflowing_sub(i1);
+                                        if overflow {
+                                            if self.is_catching {
+                                                stack.push(Value::Error("Integer subtraction overflow".to_string()));
+                                            } else {
+                                                return Err("Integer subtraction overflow".to_string());
+                                            }
+                                        } else {
+                                            stack.push(Value::Int(result));
+                                        }
+                                    }
+                                    Value::Float(f) => {
+                                        stack.push(Value::Float(f - i1 as f64));
+                                    }
+                                    Value::BigInt(b) => {
+                                        stack.push(Value::BigInt(&b - (i1 as i64)));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::BigInt(i1) => match val2 {
-                                    Value::BigInt(i) => {
-                                        self.stack.push(Value::BigInt(i - i1));
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
-                                        } else {
-                                            return Err(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
-                                        }
-                                    }
-                                },
+                                }
                                 Value::Float(f1) => match val2 {
                                     Value::Float(f) => {
-                                        self.stack.push(Value::Float(f - f1));
+                                        stack.push(Value::Float(f - f1));
+                                    }
+                                    Value::Int(i) => {
+                                        stack.push(Value::Float(i as f64 - f1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::LFloat(f1) => match val2 {
-                                    Value::LFloat(f) => {
-                                        self.stack.push(Value::LFloat(f - f1));
+                                }
+                                Value::BigInt(b1) => match val2 {
+                                    Value::BigInt(b) => {
+                                        stack.push(Value::BigInt(&b - &b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::String(s1) => match val2 {
-                                    Value::String(s2) => {
-                                        if let Some(index) = s2.rfind(&s1) {
-                                            let result = format!(
-                                                "{}{}",
-                                                &s2[..index],
-                                                &s2[index + s1.len()..]
-                                            );
-                                            self.stack.push(Value::String(result));
-                                        } else if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
-                                                "Substring '{}' not found in '{}'",
-                                                s1, s2
-                                            )));
-                                        } else {
-                                            return Err(format!(
-                                                "Substring '{}' not found in '{}'",
-                                                s1, s2
-                                            ));
-                                        }
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
-                                                "Subtraction is not supported between the types {} and {}",
-                                                "string",
-                                                value_to_readable(&val2)
-                                            )));
-                                        } else {
-                                            return Err(format!(
-                                                "Subtraction is not supported between the types {} and {}",
-                                                "string",
-                                                value_to_readable(&val2)
-                                            ));
-                                        }
-                                    }
-                                },
+                                }
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the subtraction operator in a non-numeric value {}", value_to_string(&val))));
+                                        stack.push(Value::Error(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                     } else {
-                                        return Err(format!("Cannot apply the addition subtraction in a non-numeric value {}", value_to_string(&val)));
+                                        return Err(format!("Subtraction is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                     }
                                 }
                             }
-                        } else if self.is_catching {
-                            self.stack
-                                .push(Value::Error(String::from("Not enough operands")));
                         } else {
-                            return Err(String::from("Not enough operands"));
+                            if self.is_catching {
+                                stack.push(val);
+                            } else {
+                                return Err("Not enough values on the stack for subtraction operation".to_string());
+                            }
                         }
-                    } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        if self.is_catching {
+                            stack.push(Value::Error("No value on the stack for subtraction operation".to_string()));
+                        } else {
+                            return Err("No value on the stack for subtraction operation".to_string());
+                        }
                     }
                 }
+                
                 Instruction::Mul => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Int(i1) => match val2 {
                                     Value::Int(i) => {
-                                        self.stack.push(Value::Int(i1 * i));
+                                        let (result, overflow) = i.overflowing_mul(i1);
+                                        if overflow {
+                                            if self.is_catching {
+                                                stack.push(Value::Error("Integer multiplication overflow".to_string()));
+                                            } else {
+                                                return Err("Integer multiplication overflow".to_string());
+                                            }
+                                        } else {
+                                            stack.push(Value::Int(result));
+                                        }
+                                    }
+                                    Value::Float(f) => {
+                                        stack.push(Value::Float(f * i1 as f64));
+                                    }
+                                    Value::BigInt(b) => {
+                                        stack.push(Value::BigInt(&b * (i1 as i64)));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::BigInt(i1) => match val2 {
-                                    Value::BigInt(i) => {
-                                        self.stack.push(Value::BigInt(i1 * i));
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
-                                        } else {
-                                            return Err(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
-                                        }
-                                    }
-                                },
+                                }
                                 Value::Float(f1) => match val2 {
                                     Value::Float(f) => {
-                                        self.stack.push(Value::Float(f1 * f));
+                                        stack.push(Value::Float(f * f1));
+                                    }
+                                    Value::Int(i) => {
+                                        stack.push(Value::Float(i as f64 * f1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::LFloat(f1) => match val2 {
-                                    Value::LFloat(f) => {
-                                        self.stack.push(Value::LFloat(f1 * f));
+                                }
+                                Value::BigInt(b1) => match val2 {
+                                    Value::BigInt(b) => {
+                                        stack.push(Value::BigInt(&b * &b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
+                                }
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the multiplication operator in a non-numeric value {}", value_to_string(&val))));
+                                        stack.push(Value::Error(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                     } else {
-                                        return Err(format!("Cannot apply the multiplication operator in a non-numeric value {}", value_to_string(&val)));
+                                        return Err(format!("Multiplication is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                     }
                                 }
                             }
-                        } else if self.is_catching {
-                            self.stack
-                                .push(Value::Error(String::from("Not enough operands")));
                         } else {
-                            return Err(String::from("Not enough operands"));
+                            if self.is_catching {
+                                stack.push(val);
+                            } else {
+                                return Err("Not enough values on the stack for multiplication operation".to_string());
+                            }
                         }
-                    } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        if self.is_catching {
+                            stack.push(Value::Error("No value on the stack for multiplication operation".to_string()));
+                        } else {
+                            return Err("No value on the stack for multiplication operation".to_string());
+                        }
                     }
                 }
+                
                 Instruction::Div => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Int(i1) => match val2 {
                                     Value::Int(i) => {
-                                        self.stack.push(Value::Int(i / i1));
+                                        if i1 != 0 {
+                                            stack.push(Value::Int(i / i1));
+                                        } else {
+                                            if self.is_catching {
+                                                stack.push(Value::Error("Integer division by zero".to_string()));
+                                            } else {
+                                                return Err("Integer division by zero".to_string());
+                                            }
+                                        }
+                                    }
+                                    Value::Float(f) => {
+                                        if i1 != 0 {
+                                            stack.push(Value::Float(f / i1 as f64));
+                                        } else {
+                                            if self.is_catching {
+                                                stack.push(Value::Error("Division by zero".to_string()));
+                                            } else {
+                                                return Err("Division by zero".to_string());
+                                            }
+                                        }
+                                    }
+                                    Value::BigInt(b) => {
+                                        if i1 != 0 {
+                                            stack.push(Value::BigInt(&b / (i1 as i64)));
+                                        } else {
+                                            if self.is_catching {
+                                                stack.push(Value::Error("Division by zero".to_string()));
+                                            } else {
+                                                return Err("Division by zero".to_string());
+                                            }
+                                        }
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::BigInt(i1) => match val2 {
-                                    Value::BigInt(i) => {
-                                        self.stack.push(Value::BigInt(i / i1));
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
-                                        } else {
-                                            return Err(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
-                                        }
-                                    }
-                                },
+                                }
                                 Value::Float(f1) => match val2 {
                                     Value::Float(f) => {
-                                        self.stack.push(Value::Float(f / f1));
+                                        if f1 != 0.0 {
+                                            stack.push(Value::Float(f / f1));
+                                        } else {
+                                            if self.is_catching {
+                                                stack.push(Value::Error("Division by zero".to_string()));
+                                            } else {
+                                                return Err("Division by zero".to_string());
+                                            }
+                                        }
+                                    }
+                                    Value::Int(i) => {
+                                        if f1 != 0.0 {
+                                            stack.push(Value::Float(i as f64 / f1));
+                                        } else {
+                                            if self.is_catching {
+                                                stack.push(Value::Error("Division by zero".to_string()));
+                                            } else {
+                                                return Err("Division by zero".to_string());
+                                            }
+                                        }
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::LFloat(f1) => match val2 {
-                                    Value::LFloat(f) => {
-                                        self.stack.push(Value::LFloat(f / f1));
+                                }
+                                Value::BigInt(b1) => match val2 {
+                                    Value::BigInt(b) => {
+                                        if !(b1 == 0) {
+                                            stack.push(Value::BigInt(&b / &b1));
+                                        } else {
+                                            if self.is_catching {
+                                                stack.push(Value::Error("Division by zero".to_string()));
+                                            } else {
+                                                return Err("Division by zero".to_string());
+                                            }
+                                        }
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
+                                }
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the division operator in a non-numeric value {}", value_to_string(&val))));
+                                        stack.push(Value::Error(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                     } else {
-                                        return Err(format!("Cannot apply the division operator in a non-numeric value {}", value_to_string(&val)));
+                                        return Err(format!("Division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                     }
                                 }
                             }
-                        } else if self.is_catching {
-                            self.stack
-                                .push(Value::Error(String::from("Not enough operands")));
                         } else {
-                            return Err(String::from("Not enough operands"));
+                            if self.is_catching {
+                                stack.push(val);
+                            } else {
+                                return Err("Not enough values on the stack for division operation".to_string());
+                            }
                         }
-                    } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        if self.is_catching {
+                            stack.push(Value::Error("No value on the stack for division operation".to_string()));
+                        } else {
+                            return Err("No value on the stack for division operation".to_string());
+                        }
                     }
                 }
+                
                 Instruction::Mod => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Int(i1) => match val2 {
                                     Value::Int(i) => {
-                                        self.stack.push(Value::Int(i % i1));
+                                        if i1 != 0 {
+                                            stack.push(Value::Int(i % i1));
+                                        } else {
+                                            if self.is_catching {
+                                                stack.push(Value::Error("Modulo division by zero".to_string()));
+                                            } else {
+                                                return Err("Modulo division by zero".to_string());
+                                            }
+                                        }
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Remainder is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Modulo division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
-                                            return Err(format!("Remainder is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
+                                            return Err(format!("Modulo division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::BigInt(i1) => match val2 {
-                                    Value::BigInt(i) => {
-                                        self.stack.push(Value::BigInt(i % i1));
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Remainder is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
-                                        } else {
-                                            return Err(format!("Remainder is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
-                                        }
-                                    }
-                                },
-                                Value::Float(f1) => match val2 {
-                                    Value::Float(f) => {
-                                        self.stack.push(Value::Float(f % f1));
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Remainder is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
-                                        } else {
-                                            return Err(format!("Remainder is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
-                                        }
-                                    }
-                                },
-                                Value::LFloat(f1) => match val2 {
-                                    Value::LFloat(f) => {
-                                        self.stack.push(Value::LFloat(f % f1));
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Remainder is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
-                                        } else {
-                                            return Err(format!("Remainder is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
-                                        }
-                                    }
-                                },
+                                }
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the modulo operator in a non-numeric value {}", value_to_string(&val))));
+                                        stack.push(Value::Error(format!("Modulo division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                     } else {
-                                        return Err(format!("Cannot apply the modulo operator in a non-numeric value {}", value_to_string(&val)));
+                                        return Err(format!("Modulo division is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                     }
                                 }
                             }
-                        } else if self.is_catching {
-                            self.stack
-                                .push(Value::Error(String::from("Not enough operands")));
                         } else {
-                            return Err(String::from("Not enough operands"));
+                            if self.is_catching {
+                                stack.push(val);
+                            } else {
+                                return Err("Not enough values on the stack for modulo division operation".to_string());
+                            }
                         }
-                    } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        if self.is_catching {
+                            stack.push(Value::Error("No value on the stack for modulo division operation".to_string()));
+                        } else {
+                            return Err("No value on the stack for modulo division operation".to_string());
+                        }
                     }
                 }
+                
                 Instruction::Pow => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Int(i1) => match val2 {
                                     Value::Int(i) => {
-                                        if i < 1 {
-                                            if self.is_catching {
-                                                self.stack.push(Value::Error(format!("Exponentiation is not supported with a negative exponent {}", value_to_readable(&val2))));
-                                            } else {
-                                                return Err(format!("Exponentiation is not supported with a negative exponent {}", value_to_readable(&val2)));
-                                            }
-                                        }
-                                        self.stack.push(Value::Int(i.pow(i1.try_into().unwrap())));
+                                        stack.push(Value::Int(i.pow(i1 as u32)));
+                                    }
+                                    Value::Float(f) => {
+                                        stack.push(Value::Float(f.powi(i1 as i32)));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Power is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Exponentiation is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
-                                            return Err(format!("Power is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
+                                            return Err(format!("Exponentiation is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::BigInt(i1) => match val2 {
-                                    Value::BigInt(i) => {
-                                        if i < 1 {
-                                            if self.is_catching {
-                                                self.stack.push(Value::Error(format!("Exponentiation is not supported with a negative exponent {}", value_to_readable(&val2))));
-                                            } else {
-                                                return Err(format!("Exponentiation is not supported with a negative exponent {}", value_to_readable(&val2)));
-                                            }
-                                        }
-                                        self.stack
-                                            .push(Value::BigInt(i.pow(i1.try_into().unwrap())));
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Power is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
-                                        } else {
-                                            return Err(format!("Power is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
-                                        }
-                                    }
-                                },
+                                }
                                 Value::Float(f1) => match val2 {
                                     Value::Float(f) => {
-                                        self.stack.push(Value::Float(f.powf(f1)));
+                                        stack.push(Value::Float(f.powf(f1)));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Power is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Exponentiation is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
-                                            return Err(format!("Power is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
+                                            return Err(format!("Exponentiation is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
                                     }
-                                },
-                                Value::LFloat(f1) => match val2 {
-                                    Value::LFloat(f) => {
-                                        self.stack.push(Value::LFloat(f.powf(f1)));
-                                    }
-                                    _ => {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Power is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
-                                        } else {
-                                            return Err(format!("Power is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
-                                        }
-                                    }
-                                },
+                                }
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the exponential operator in a non-numeric value {}", value_to_string(&val))));
+                                        stack.push(Value::Error(format!("Exponentiation is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                     } else {
-                                        return Err(format!("Cannot apply the exponential operator in a non-numeric value {}", value_to_string(&val)));
+                                        return Err(format!("Exponentiation is not supported between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                     }
                                 }
                             }
-                        } else if self.is_catching {
-                            self.stack
-                                .push(Value::Error(String::from("Not enough operands")));
                         } else {
-                            return Err(String::from("Not enough operands"));
+                            if self.is_catching {
+                                stack.push(val);
+                            } else {
+                                return Err("Not enough values on the stack for exponentiation operation".to_string());
+                            }
                         }
-                    } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        if self.is_catching {
+                            stack.push(Value::Error("No value on the stack for exponentiation operation".to_string()));
+                        } else {
+                            return Err("No value on the stack for exponentiation operation".to_string());
+                        }
                     }
-                }
+                }                                
                 Instruction::And => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Boolean(b1) => match val2 {
                                     Value::Boolean(b2) => {
-                                        self.stack.push(Value::Boolean(b1 && b2));
+                                        stack.push(Value::Boolean(b1 && b2));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the and operator in a non-boolean value {}", value_to_string(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the and operator in a non-boolean value {}", value_to_string(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the and operator in a non-boolean value {}", value_to_string(&val2)));
                                         }
@@ -1612,36 +1754,36 @@ impl VirtualMachine {
                                 },
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the and operator in a non-boolean value {}", value_to_string(&val))));
+                                        stack.push(Value::Error(format!("Cannot apply the and operator in a non-boolean value {}", value_to_string(&val))));
                                     } else {
                                         return Err(format!("Cannot apply the and operator in a non-boolean value {}", value_to_string(&val)));
                                     }
                                 }
                             }
                         } else if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(String::from("Not enough operands")));
                         } else {
                             return Err(String::from("Not enough operands"));
                         }
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty (at ANDing two operands)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at ANDing two operands)"));
                     }
                 }
                 Instruction::Or => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Boolean(b1) => match val2 {
                                     Value::Boolean(b2) => {
-                                        self.stack.push(Value::Boolean(b1 || b2));
+                                        stack.push(Value::Boolean(b1 || b2));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the or operator in a non-boolean value {}", value_to_string(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the or operator in a non-boolean value {}", value_to_string(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the or operator in a non-boolean value {}", value_to_string(&val2)));
                                         }
@@ -1649,36 +1791,36 @@ impl VirtualMachine {
                                 },
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the or operator in a non-boolean value {}", value_to_string(&val))));
+                                        stack.push(Value::Error(format!("Cannot apply the or operator in a non-boolean value {}", value_to_string(&val))));
                                     } else {
                                         return Err(format!("Cannot apply the or operator in a non-boolean value {}", value_to_string(&val)));
                                     }
                                 }
                             }
                         } else if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(String::from("Not enough operands")));
                         } else {
                             return Err(String::from("Not enough operands"));
                         }
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty (at ORing two operands)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at ORing two operands)"));
                     }
                 }
                 Instruction::Xor => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Boolean(b1) => match val2 {
                                     Value::Boolean(b2) => {
-                                        self.stack.push(Value::Boolean(b1 ^ b2));
+                                        stack.push(Value::Boolean(b1 ^ b2));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the xor operator in a non-boolean value {}", value_to_string(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the xor operator in a non-boolean value {}", value_to_string(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the xor operator in a non-boolean value {}", value_to_string(&val2)));
                                         }
@@ -1686,34 +1828,34 @@ impl VirtualMachine {
                                 },
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the xor operator in a non-boolean value {}", value_to_string(&val))));
+                                        stack.push(Value::Error(format!("Cannot apply the xor operator in a non-boolean value {}", value_to_string(&val))));
                                     } else {
                                         return Err(format!("Cannot apply the xor operator in a non-boolean value {}", value_to_string(&val)));
                                     }
                                 }
                             }
                         } else if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(String::from("Not enough operands")));
                         } else {
                             return Err(String::from("Not enough operands"));
                         }
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty (at XORing two operands)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at XORing two operands)"));
                     }
                 }
                 Instruction::Not => {
-                    if let Some(val) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
                         match val {
                             Value::Boolean(b1) => {
-                                self.stack.push(Value::Boolean(!b1));
+                                stack.push(Value::Boolean(!b1));
                             }
                             _ => {
                                 if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
+                                    stack.push(Value::Error(format!(
                                         "Cannot apply the not operator in a non-boolean value {}",
                                         value_to_string(&val)
                                     )));
@@ -1728,50 +1870,50 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::Eq => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
-                            self.stack.push(Value::Boolean(val == val2));
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
+                            stack.push(Value::Boolean(val == val2));
                         } else if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(String::from("Not enough operands")));
                         } else {
                             return Err(String::from("Not enough operands"));
                         }
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty (at comparing two operands)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at comparing two operands)"));
                     }
                 }
                 Instruction::Ne => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
-                            self.stack.push(Value::Boolean(val != val2));
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
+                            stack.push(Value::Boolean(val != val2));
                         } else if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(String::from("Not enough operands")));
                         } else {
                             return Err(String::from("Not enough operands"));
                         }
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty (at comparing two operands)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at comparing two operands)"));
                     }
                 }
                 Instruction::Gt => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Int(b1) => match val2 {
                                     Value::Int(b2) => {
-                                        self.stack.push(Value::Boolean(b2 > b1));
+                                        stack.push(Value::Boolean(b2 > b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1779,11 +1921,11 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(b1) => match val2 {
                                     Value::BigInt(b2) => {
-                                        self.stack.push(Value::Boolean(b2 > b1));
+                                        stack.push(Value::Boolean(b2 > b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1791,11 +1933,11 @@ impl VirtualMachine {
                                 },
                                 Value::Float(b1) => match val2 {
                                     Value::Float(b2) => {
-                                        self.stack.push(Value::Boolean(b2 > b1));
+                                        stack.push(Value::Boolean(b2 > b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1803,11 +1945,11 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(b1) => match val2 {
                                     Value::LFloat(b2) => {
-                                        self.stack.push(Value::Boolean(b2 > b1));
+                                        stack.push(Value::Boolean(b2 > b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1815,36 +1957,36 @@ impl VirtualMachine {
                                 },
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                        stack.push(Value::Error(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                     } else {
                                         return Err(format!("Cannot apply the greater than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                     }
                                 }
                             }
                         } else if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(String::from("Not enough operands")));
                         } else {
                             return Err(String::from("Not enough operands"));
                         }
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty (at comparing two operands)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at comparing two operands)"));
                     }
                 }
                 Instruction::Lt => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Int(b1) => match val2 {
                                     Value::Int(b2) => {
-                                        self.stack.push(Value::Boolean(b2 < b1));
+                                        stack.push(Value::Boolean(b2 < b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1852,11 +1994,11 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(b1) => match val2 {
                                     Value::BigInt(b2) => {
-                                        self.stack.push(Value::Boolean(b2 < b1));
+                                        stack.push(Value::Boolean(b2 < b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1864,11 +2006,11 @@ impl VirtualMachine {
                                 },
                                 Value::Float(b1) => match val2 {
                                     Value::Float(b2) => {
-                                        self.stack.push(Value::Boolean(b2 < b1));
+                                        stack.push(Value::Boolean(b2 < b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1876,11 +2018,11 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(b1) => match val2 {
                                     Value::LFloat(b2) => {
-                                        self.stack.push(Value::Boolean(b2 < b1));
+                                        stack.push(Value::Boolean(b2 < b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1888,36 +2030,36 @@ impl VirtualMachine {
                                 },
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                        stack.push(Value::Error(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                     } else {
                                         return Err(format!("Cannot apply the less than operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                     }
                                 }
                             }
                         } else if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(String::from("Not enough operands")));
                         } else {
                             return Err(String::from("Not enough operands"));
                         }
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty (at comparing two operands)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at comparing two operands)"));
                     }
                 }
                 Instruction::Gte => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Int(b1) => match val2 {
                                     Value::Int(b2) => {
-                                        self.stack.push(Value::Boolean(b2 >= b1));
+                                        stack.push(Value::Boolean(b2 >= b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1925,11 +2067,11 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(b1) => match val2 {
                                     Value::BigInt(b2) => {
-                                        self.stack.push(Value::Boolean(b2 >= b1));
+                                        stack.push(Value::Boolean(b2 >= b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1937,11 +2079,11 @@ impl VirtualMachine {
                                 },
                                 Value::Float(b1) => match val2 {
                                     Value::Float(b2) => {
-                                        self.stack.push(Value::Boolean(b2 >= b1));
+                                        stack.push(Value::Boolean(b2 >= b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1949,11 +2091,11 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(b1) => match val2 {
                                     Value::LFloat(b2) => {
-                                        self.stack.push(Value::Boolean(b2 >= b1));
+                                        stack.push(Value::Boolean(b2 >= b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1961,36 +2103,36 @@ impl VirtualMachine {
                                 },
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                        stack.push(Value::Error(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                     } else {
                                         return Err(format!("Cannot apply the greater than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                     }
                                 }
                             }
                         } else if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(String::from("Not enough operands")));
                         } else {
                             return Err(String::from("Not enough operands"));
                         }
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty (at comparing two operands)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at comparing two operands)"));
                     }
                 }
                 Instruction::Lte => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Some(val2) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
+                        if let Some(val2) = stack.pop() {
                             match val {
                                 Value::Int(b1) => match val2 {
                                     Value::Int(b2) => {
-                                        self.stack.push(Value::Boolean(b2 <= b1));
+                                        stack.push(Value::Boolean(b2 <= b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -1998,11 +2140,11 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(b1) => match val2 {
                                     Value::BigInt(b2) => {
-                                        self.stack.push(Value::Boolean(b2 <= b1));
+                                        stack.push(Value::Boolean(b2 <= b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -2010,11 +2152,11 @@ impl VirtualMachine {
                                 },
                                 Value::Float(b1) => match val2 {
                                     Value::Float(b2) => {
-                                        self.stack.push(Value::Boolean(b2 <= b1));
+                                        stack.push(Value::Boolean(b2 <= b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -2022,11 +2164,11 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(b1) => match val2 {
                                     Value::LFloat(b2) => {
-                                        self.stack.push(Value::Boolean(b2 <= b1));
+                                        stack.push(Value::Boolean(b2 <= b1));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                            stack.push(Value::Error(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                         } else {
                                             return Err(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                         }
@@ -2034,23 +2176,23 @@ impl VirtualMachine {
                                 },
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
+                                        stack.push(Value::Error(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2))));
                                     } else {
                                         return Err(format!("Cannot apply the less than equal operator between the types {} and {}", value_to_readable(&val), value_to_readable(&val2)));
                                     }
                                 }
                             }
                         } else if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(String::from("Not enough operands")));
                         } else {
                             return Err(String::from("Not enough operands"));
                         }
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty (at comparing two operands)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at comparing two operands)"));
                     }
                 }
                 Instruction::Label(_) => continue,
@@ -2069,7 +2211,7 @@ impl VirtualMachine {
                 Instruction::Invoke(name) => {
                     if !self.functions.contains_key(name) {
                         if self.is_catching {
-                            self.stack.push(Value::Error(format!(
+                            stack.push(Value::Error(format!(
                                 "Cannot invoke undefined function {}",
                                 name
                             )));
@@ -2089,13 +2231,13 @@ impl VirtualMachine {
                                     match result {
                                         Value::Error(e) => {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(e));
+                                                stack.push(Value::Error(e));
                                             } else {
                                                 return Err(e);
                                             }
                                         }
                                         _ => {
-                                            self.stack.push(result);
+                                            stack.push(result);
                                         }
                                     }
                                 } else {
@@ -2107,13 +2249,13 @@ impl VirtualMachine {
                                     match result {
                                         Value::Error(e) => {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(e));
+                                                stack.push(Value::Error(e));
                                             } else {
                                                 return Err(e);
                                             }
                                         }
                                         _ => {
-                                            self.stack.push(result);
+                                            stack.push(result);
                                         }
                                     }
                                 }
@@ -2123,7 +2265,7 @@ impl VirtualMachine {
                                     if fun.name == self.last_runned {
                                         self.recursive_level += 1;
                                         if self.recursive_level >= self.max_recursiveness_level {
-                                            return Err(format!("Max recursiveness level depth exceeded: Function '{}' called itself {} times.", fun.name, self.recursive_level))
+                                            return Err(format!("Max recursiveness level depth exceeded: Function `{}` called itself {} times.", fun.name, self.recursive_level))
                                         }
                                     } else {
                                         self.recursive_level = 0;
@@ -2133,7 +2275,7 @@ impl VirtualMachine {
                                 let mut args: VecDeque<Value> = VecDeque::new();
                                 if self.args_stack.len() != fun.args.len() {
                                     if self.is_catching {
-                                        self.stack
+                                        stack
                                             .push(Value::Error(String::from("The argument stack cannot fulfil the size of the function's arguments.")));
                                     } else {
                                         return Err(String::from("The argument stack cannot fulfil the size of the function's arguments."));
@@ -2149,12 +2291,12 @@ impl VirtualMachine {
                                     type_check_value(args.clone().into(), fun.args.clone());
                                 if let Err(err) = typechecks {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(err));
+                                        stack.push(Value::Error(err));
                                     } else {
                                         return Err(err);
                                     }
                                 } else {
-                                    self.stack_before = self.stack.clone();
+                                    self.stack_before = stack.clone();
                                     self.expected_return_types.push(fun.returns.clone());
                                     self.returns_to.push(self.pc + 1);
                                     let fun_body_len = fun.body.len();
@@ -2185,36 +2327,36 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::Pop(name) => {
-                    let top = self.stack.pop();
+                    let top = stack.pop();
                     if let Some(top) = top {
                         self.allocate_variable(name.clone(), top);
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty (at popping an element from the stack to a variable)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty  (at popping an element from the stack to a variable)"));
                     }
                 }
                 Instruction::PopToRoot(name) => {
-                    let top = self.stack.pop();
+                    let top = stack.pop();
                     if let Some(top) = top {
                         self.allocate_variable_in_root(name.clone(), top);
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty  (at popping an element from the stack to a variable)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at popping an element from the stack to a variable)"));
                     }
                 }
                 Instruction::ToArgsStack => {
-                    let top = self.stack.pop();
+                    let top = stack.pop();
                     if let Some(top) = top {
                         self.args_stack.push_back(top);
                     } else if self.is_catching {
-                        self.stack
-                            .push(Value::Error(String::from("The stack is empty")));
+                        stack
+                            .push(Value::Error(String::from("The stack is empty  (at moving an element from the data stack to the arguments' stack)")));
                     } else {
-                        return Err(String::from("The stack is empty"));
+                        return Err(String::from("The stack is empty (at moving an element from the data stack to the arguments' stack)"));
                     }
                 }
                 Instruction::Return => {
@@ -2225,10 +2367,11 @@ impl VirtualMachine {
                             self.instructions.drain(
                                 (self.pc as usize + 1)..((self.pc + self.block_len) as usize),
                             );
-                            let value_to_return = self.stack.pop();
+                            let value_to_return = stack.pop();
                             match value_to_return {
                                 Some(value) => {
-                                    if self.stack_before != self.stack {
+                                    let stack_ref: &Vec<Value> = stack.as_ref();
+                                    if &self.stack_before != stack_ref {
                                         return Err(format!("Type checking failed: the function `{}` (latest function called) modified the stack beyond its bounds", self.last_runned))
                                     } else {
                                         let expected_to_return = self.expected_return_types.pop();
@@ -2237,7 +2380,7 @@ impl VirtualMachine {
                                                 let typechecks = type_check_value(vec![value.clone()], vec![(String::from("random_return_arg_placeholder"), type_.clone())]);
                                                 match typechecks {
                                                     Ok(_) => {
-                                                        self.stack.push(value);
+                                                        stack.push(value);
                                                         continue;
                                                     }
                                                     Err(_) => {
@@ -2278,7 +2421,7 @@ impl VirtualMachine {
                     return Err("ClassHasStaticMethod is deprecated".to_string());
                 }
                 Instruction::HaltFromStack => {
-                    let val = self.stack.pop();
+                    let val = stack.pop();
                     match val {
                         Some(val) => return Ok(val),
                         None => return Ok(Value::None),
@@ -2330,50 +2473,59 @@ impl VirtualMachine {
                     return Err(format!("EndFunction is not a standalone instruction"))
                 }
                 Instruction::Duplicate => {
-                    if self.stack.len() == 0 {
+                    if stack.len() == 0 {
                         return Err(format!("Cannot use duplicate on an empty stack"));
                     }
-                    let val = self.stack.pop().unwrap();
-                    self.stack.push(val.clone());
-                    self.stack.push(val);
+                    let val = stack.pop().unwrap();
+                    stack.push(val.clone());
+                    stack.push(val);
                 }
                 Instruction::Include(path) => {
-                    let newpath = canonicalize(path);
-                    if let Err(err) = newpath {
-                        return Err(format!("Failed to create include path correctly: {}", err));
-                    }
-                    let newpath = newpath.unwrap();
-                    if self.included.contains(&newpath) {
-                        continue;
-                    }
-                    let res = std::fs::File::open(path);
-                    if let Ok(mut file) = res {
-                        let instructions = asm::read_instructions(&mut file);
-                        if let Err(err) = instructions {
-                            return Err(format!("Could not read instructions from file: {err}"));
-                        } else if let Ok(ins) = instructions {
-                            let mut new_runtime_proto = VirtualMachine::new(ins, &newpath.as_os_str().to_string_lossy().to_string())?;
-                            new_runtime_proto.check_labels();
-                            new_runtime_proto.run(String::from("__module__"), &local_instant, None, stdout_global, stderr_global).await?;
-                            self.functions
-                                .extend(new_runtime_proto.functions.into_iter());
-                            self.gc.absorb(&mut new_runtime_proto.gc);
-                            self.stored_closures
-                                .append(&mut new_runtime_proto.stored_closures);
-                            self.variables
-                                .extend(new_runtime_proto.variables.clone().into_iter());
-                            self.classes.extend(new_runtime_proto.classes.into_iter());
-                            self.included.push(newpath);
+                    task::block_on(async {
+                        let newpath = canonicalize(path);
+                        if let Err(err) = newpath {
+                            return Err(format!("Failed to create include path correctly: {}", err));
                         }
-                    } else if let Err(err) = res {
-                        return Err(format!("Could not open file '{}': {}", path, err));
-                    }
+                        let newpath = newpath.unwrap();
+                        if self.included.contains(&newpath) {
+                            return Ok(())
+                        }
+                        let res = std::fs::File::open(path);
+                        if let Ok(mut file) = res {
+                            let instructions = asm::read_instructions(&mut file);
+                            if let Err(err) = instructions {
+                                return Err(format!("Could not read instructions from file: {err}"));
+                            } else if let Ok(ins) = instructions {
+                                let mut new_runtime_proto = VirtualMachine::new(ins, &newpath.as_os_str().to_string_lossy().to_string())?;
+                                new_runtime_proto.check_labels();
+                                task::block_on(new_runtime_proto.run(Arc::new(String::from("__module__")), instant, None, stdout_global, stderr_global))?;
+                                self.functions
+                                    .extend(new_runtime_proto.functions.into_iter());
+                                let mut gc = self.gc.borrow_mut();
+                                gc.absorb(new_runtime_proto.gc.get_mut());
+                                self.stored_closures
+                                    .append(&mut new_runtime_proto.stored_closures);
+                                let mut variables = self.variables.borrow_mut();
+                                variables
+                                    .extend(new_runtime_proto.variables.borrow().clone().into_iter());
+                                self.classes.extend(new_runtime_proto.classes.into_iter());
+                                self.included.push(newpath);
+                                Ok(())
+                            } else {
+                                unreachable!()
+                            }
+                        } else if let Err(err) = res {
+                            return Err(format!("Could not open file `{}`: {}", path, err));
+                        } else {
+                            unreachable!()
+                        }
+                    })?;
                 }
                 Instruction::LoopStart => {
                     self.loop_addresses.push(self.pc); // Push the loop start address onto the stack
                 }
                 Instruction::LoopEnd => {
-                    if let Some(Value::Boolean(val)) = self.stack.pop() {
+                    if let Some(Value::Boolean(val)) = stack.pop() {
                         if val {
                             if let Some(addr) = self.loop_addresses.last() {
                                 self.pc = *addr; // Set the program counter to the loop start address
@@ -2390,7 +2542,7 @@ impl VirtualMachine {
                     let tokens = tokenize(ins, "<inline-runtime-evaluated>");
                     if let Err(err) = tokens {
                         if self.is_catching {
-                            self.stack.push(Value::Error(format!(
+                            stack.push(Value::Error(format!(
                                 "Error during evaluation of inline assembly: \n{}",
                                 underline_filename_line_column(err)
                             )));
@@ -2414,7 +2566,7 @@ impl VirtualMachine {
                             self.instructions.append(&mut VecDeque::from(other_part));
                         } else if let Err(err) = res {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Error during evaluation of inline assembly: {}",
                                     underline_filename_line_column(err)
                                 )));
@@ -2428,27 +2580,15 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::DereferenceRaw => {
-                    let item = self.stack.pop();
+                    let item = stack.pop();
                     if let Some(item) = item {
                         match item {
                             Value::PtrWrapper(ptr) => {
-                                if ptr.is_null() {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Dereferencing a null pointer is undefined behaviour"
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "Dereferencing a null pointer is undefined behaviour"
-                                        ));
-                                    }
-                                } else {
-                                    self.stack.push(unsafe { ptr.as_ref().unwrap().clone() });
-                                }
+                                stack.push(unsafe { ptr.as_ref().clone() });
                             }
                             _ => {
                                 if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
+                                    stack.push(Value::Error(format!(
                                         "Cannot dereference non-pointer value"
                                     )));
                                 } else {
@@ -2458,7 +2598,7 @@ impl VirtualMachine {
                         }
                     } else {
                         if self.is_catching {
-                            self.stack.push(Value::Error(format!(
+                            stack.push(Value::Error(format!(
                                 "Cannot dereference pointer because the stack is empty"
                             )));
                         } else {
@@ -2469,29 +2609,21 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::DebuggingPrintStack => {
-                    let result = stderr_global.write_fmt(format_args!("{:?}", self.stack));
+                    let mut stderr_global = stderr_global.lock();
+                    let result = stderr_global.write_fmt(format_args!("{:?}", stack));
                     if let Err(err) = result {
                         return Err(format!("Could not print stack (debug): {}", err));
                     }
                 }
                 Instruction::MemoryReadVolatile(loc) => {
                     if let Value::PtrWrapper(ptr) = loc {
-                        if ptr.is_null() {
-                            if self.is_catching {
-                                self.stack
-                                    .push(Value::Error(format!("Cannot read from null pointer")));
-                            } else {
-                                return Err(format!("Cannot read from null pointer"));
-                            }
-                        } else {
-                            unsafe {
-                                let value = std::ptr::read_volatile(*ptr as *const Value);
-                                self.stack.push(value);
-                            }
+                        unsafe {
+                            let value = std::ptr::read_volatile(ptr.as_ptr() as *const Value);
+                            stack.push(value);
                         }
                     } else {
                         if self.is_catching {
-                            self.stack.push(Value::Error(format!(
+                            stack.push(Value::Error(format!(
                                 "The instruction MemoryReadVolatile expects a pointer as argument"
                             )));
                         } else {
@@ -2503,21 +2635,12 @@ impl VirtualMachine {
                 }
                 Instruction::MemoryWriteVolatile(src, dst) => {
                     if let Value::PtrWrapper(ptr) = dst {
-                        if ptr.is_null() {
-                            if self.is_catching {
-                                self.stack
-                                    .push(Value::Error(format!("Cannot write to null pointer")));
-                            } else {
-                                return Err(format!("Cannot write to null pointer"));
-                            }
-                        } else {
-                            unsafe {
-                                std::ptr::write_volatile(ptr.as_mut().unwrap(), src.clone());
-                            }
+                        unsafe {
+                            std::ptr::write_volatile(ptr.as_ptr() as *mut Value, src.clone());
                         }
                     } else {
                         if self.is_catching {
-                            self.stack.push(Value::Error(format!(
+                            stack.push(Value::Error(format!(
                                 "The instruction MemoryWriteVolatile expects a pointer as second argument"
                             )));
                         } else {
@@ -2531,20 +2654,20 @@ impl VirtualMachine {
                     self.collect_garbage();
                 }
                 Instruction::EnterScope => {
-                    self.gc.enter_scope();
+                    self.enter_scope();
                 }
                 Instruction::LeaveScope => {
-                    self.gc.leave_scope();
+                    self.leave_scope();
                 }
                 Instruction::AsRef => {
-                    if let Some(mut val) = self.stack.pop() {
-                        self.stack.push(Value::PtrWrapper(&mut val as *mut Value));
-                        self.stack.push(val);
-                        let len = self.stack.len();
-                        self.stack.swap(len - 1, len - 2);
+                    if let Some(mut val) = stack.pop() {
+                        stack.push(Value::PtrWrapper(NonNull::new(&mut val as *mut Value).unwrap()));
+                        stack.push(val);
+                        let len = stack.len();
+                        stack.swap(len - 1, len - 2);
                     } else {
                         if self.is_catching {
-                            self.stack.push(Value::Error(
+                            stack.push(Value::Error(
                                 "Could not convert to pointer: The stack is empty".to_string(),
                             ))
                         } else {
@@ -2555,14 +2678,14 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::HasRefSameLoc => {
-                    if let Some(ptr) = self.stack.pop() {
-                        if let Some(ptr2) = self.stack.pop() {
+                    if let Some(ptr) = stack.pop() {
+                        if let Some(ptr2) = stack.pop() {
                             if let Value::PtrWrapper(ptr) = ptr {
                                 if let Value::PtrWrapper(ptr2) = ptr2 {
-                                    self.stack.push(Value::Boolean(ptr == ptr2));
+                                    stack.push(Value::Boolean(ptr == ptr2));
                                 } else {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(
+                                        stack.push(Value::Error(
                                             "HasRefSameLoc expects two pointers for arguments"
                                                 .to_string(),
                                         ))
@@ -2575,7 +2698,7 @@ impl VirtualMachine {
                                 }
                             } else {
                                 if self.is_catching {
-                                    self.stack.push(Value::Error(
+                                    stack.push(Value::Error(
                                         "HasRefSameLoc expects two pointers for arguments"
                                             .to_string(),
                                     ))
@@ -2586,7 +2709,7 @@ impl VirtualMachine {
                             }
                         } else {
                             if self.is_catching {
-                                self.stack.push(Value::Error(
+                                stack.push(Value::Error(
                                     "Could not compare pointer's location: The stack has only one operand".to_string(),
                                 ))
                             } else {
@@ -2597,7 +2720,7 @@ impl VirtualMachine {
                         }
                     } else {
                         if self.is_catching {
-                            self.stack.push(Value::Error(
+                            stack.push(Value::Error(
                                 "Could not compare pointer's location: The stack is empty"
                                     .to_string(),
                             ))
@@ -2608,17 +2731,17 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::RefDifferenceInLoc => {
-                    if let Some(ptr) = self.stack.pop() {
-                        if let Some(ptr2) = self.stack.pop() {
+                    if let Some(ptr) = stack.pop() {
+                        if let Some(ptr2) = stack.pop() {
                             if let Value::PtrWrapper(ptr) = ptr {
                                 if let Value::PtrWrapper(ptr2) = ptr2 {
-                                    self.stack.push(Value::BigInt(unsafe {
-                                        (ptr as *const u8).offset_from(ptr2 as *const u8)
+                                    stack.push(Value::BigInt(unsafe {
+                                        (ptr.as_ptr() as *const u8).offset_from(ptr2.as_ptr() as *const u8)
                                     }
                                         as i64));
                                 } else {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(
+                                        stack.push(Value::Error(
                                             "HasRefSameLoc expects two pointers for arguments"
                                                 .to_string(),
                                         ))
@@ -2631,7 +2754,7 @@ impl VirtualMachine {
                                 }
                             } else {
                                 if self.is_catching {
-                                    self.stack.push(Value::Error(
+                                    stack.push(Value::Error(
                                         "HasRefSameLoc expects two pointers for arguments"
                                             .to_string(),
                                     ))
@@ -2642,7 +2765,7 @@ impl VirtualMachine {
                             }
                         } else {
                             if self.is_catching {
-                                self.stack.push(Value::Error(
+                                stack.push(Value::Error(
                                     "Could not compare pointer's location: The stack has only one operand".to_string(),
                                 ))
                             } else {
@@ -2653,7 +2776,7 @@ impl VirtualMachine {
                         }
                     } else {
                         if self.is_catching {
-                            self.stack.push(Value::Error(
+                            stack.push(Value::Error(
                                 "Could not compare pointer's location: The stack is empty"
                                     .to_string(),
                             ))
@@ -2664,14 +2787,14 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::Typeof => {
-                    if let Some(val) = self.stack.pop() {
-                        self.stack.push(Value::String(value_to_typeof(&val)));
-                        self.stack.push(val);
-                        let len = self.stack.len();
-                        self.stack.swap(len - 1, len - 2);
+                    if let Some(val) = stack.pop() {
+                        stack.push(Value::String(value_to_typeof(&val)));
+                        stack.push(val);
+                        let len = stack.len();
+                        stack.swap(len - 1, len - 2);
                     } else {
                         if self.is_catching {
-                            self.stack.push(Value::Error(
+                            stack.push(Value::Error(
                                 "Couldn't apply typeof operator: The stack is empty".to_string(),
                             ))
                         } else {
@@ -2682,22 +2805,22 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::IsInstanceof(name) => {
-                    if let Some(val) = self.stack.pop() {
+                    if let Some(val) = stack.pop() {
                         if let Value::Class(c) = val {
                             if &c.name == name {
-                                self.stack.push(Value::Class(c));
-                                self.stack.push(Value::Boolean(true));
+                                stack.push(Value::Class(c));
+                                stack.push(Value::Boolean(true));
                             } else {
-                                self.stack.push(Value::Class(c));
-                                self.stack.push(Value::Boolean(false));
+                                stack.push(Value::Class(c));
+                                stack.push(Value::Boolean(false));
                             }
                         } else {
-                            self.stack.push(val);
-                            self.stack.push(Value::Boolean(false));
+                            stack.push(val);
+                            stack.push(Value::Boolean(false));
                         }
                     } else {
                         if self.is_catching {
-                            self.stack.push(Value::Error(
+                            stack.push(Value::Error(
                                 "Couldn't apply isinstanceof operator: The stack is empty"
                                     .to_string(),
                             ))
@@ -2709,11 +2832,11 @@ impl VirtualMachine {
                 }
                 Instruction::GetFunctionPtr(name) => {
                     if let Some((function, _)) = self.functions.get(name) {
-                        self.stack
+                        stack
                             .push(Value::Function(function as *const Function));
                     } else {
                         if self.is_catching {
-                            self.stack.push(Value::Error(
+                            stack.push(Value::Error(
                                 "Couldn't push function pointer to stack: Function not found"
                                     .to_string(),
                             ))
@@ -2726,7 +2849,7 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::InvokeViaPtr => {
-                    if let Some(f) = self.stack.pop() {
+                    if let Some(f) = stack.pop() {
                         if let Value::Function(f) = f {
                             let function = unsafe { std::ptr::read_volatile(f) };
                             match function {
@@ -2739,13 +2862,13 @@ impl VirtualMachine {
                                     match result {
                                         Value::Error(e) => {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(e));
+                                                stack.push(Value::Error(e));
                                             } else {
                                                 return Err(e);
                                             }
                                         }
                                         _ => {
-                                            self.stack.push(result);
+                                            stack.push(result);
                                         }
                                     }
                                 }
@@ -2754,16 +2877,17 @@ impl VirtualMachine {
                                         if fun.name == self.last_runned {
                                             self.recursive_level += 1;
                                             if self.recursive_level >= self.max_recursiveness_level {
-                                                return Err(format!("Max recursiveness level depth exceeded: Function '{}' called itself {} times.", fun.name, self.recursive_level))
+                                                return Err(format!("Max recursiveness level depth exceeded: Function `{}` called itself {} times.", fun.name, self.recursive_level))
                                             }
                                         } else {
                                             self.recursive_level = 0;
+                                            self.last_runned = fun.name.clone();
                                         }
                                     }
                                     let mut args: VecDeque<Value> = VecDeque::new();
                                     if self.args_stack.len() != fun.args.len() {
                                         if self.is_catching {
-                                            self.stack
+                                            stack
                                                 .push(Value::Error(String::from("The argument stack cannot fulfil the size of the function's arguments.")));
                                         } else {
                                             return Err(String::from("The argument stack cannot fulfil the size of the function's arguments."));
@@ -2779,20 +2903,20 @@ impl VirtualMachine {
                                         type_check_value(args.clone().into(), fun.args.clone());
                                     if let Err(err) = typechecks {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(err));
+                                            stack.push(Value::Error(err));
                                         } else {
                                             return Err(err);
                                         }
                                     } else {
-                                        self.stack_before = self.stack.clone();
+                                        self.stack_before = stack.clone();
                                         self.expected_return_types.push(fun.returns.clone());
-                                        self.returns_to.push(self.pc + 1); // Dunno why 3, if i put any other num here it crashes
+                                        self.returns_to.push(self.pc + 1);
                                         let fun_body_len = fun.body.len();
                                         self.instructions
                                             .drain(self.pc as usize..(self.pc as usize));
                                         let other_part = self
                                             .instructions
-                                            .drain((self.pc as usize)..)
+                                            .drain((self.pc as usize + 1)..)
                                             .collect::<Vec<Instruction>>();
                                         self.instructions
                                             .append(&mut VecDeque::from(fun.body.clone()));
@@ -2805,13 +2929,14 @@ impl VirtualMachine {
                                             new_args.insert(varname, value);
                                         }
                                         self.args_to_alloc.push(new_args);
+                                        self.check_labels_from_pc(self.pc as usize);
                                     }
                                 }
                                 Function::Closure(fun) => {
                                     let mut args: VecDeque<Value> = VecDeque::new();
                                     if self.args_stack.len() != fun.args.len() {
                                         if self.is_catching {
-                                            self.stack
+                                            stack
                                                 .push(Value::Error(String::from("The argument stack cannot fulfil the size of the function's arguments.")));
                                         } else {
                                             return Err(String::from("The argument stack cannot fulfil the size of the function's arguments."));
@@ -2827,18 +2952,20 @@ impl VirtualMachine {
                                         type_check_value(args.clone().into(), fun.args.clone());
                                     if let Err(err) = typechecks {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(err));
+                                            stack.push(Value::Error(err));
                                         } else {
                                             return Err(err);
                                         }
                                     } else {
-                                        self.returns_to.push(self.pc + 3);
+                                        self.stack_before = stack.clone();
+                                        self.expected_return_types.push(fun.returns.clone());
+                                        self.returns_to.push(self.pc + 1);
                                         let fun_body_len = fun.body.len();
                                         self.instructions
                                             .drain(self.pc as usize..(self.pc as usize));
                                         let other_part = self
                                             .instructions
-                                            .drain((self.pc as usize)..)
+                                            .drain((self.pc as usize + 1)..)
                                             .collect::<Vec<Instruction>>();
                                         self.instructions
                                             .append(&mut VecDeque::from(fun.body.clone()));
@@ -2846,13 +2973,20 @@ impl VirtualMachine {
                                         self.block_len = fun_body_len as i64;
                                         let zipped = fun.args.clone().into_iter();
                                         let zipped = zipped.zip(args.into_iter());
+                                        let mut new_args = FxHashMap::default();
                                         for ((varname, _), value) in zipped {
-                                            self.allocate_variable(varname, value);
+                                            new_args.insert(varname, value);
                                         }
+                                        self.args_to_alloc.push(new_args);
+                                        self.check_labels_from_pc(self.pc as usize);
                                     }
                                 }
                             }
+                        } else {
+                            return Err(format!("Cannot invoke function via ptr: Type `{}` is not callable", value_to_readable(&f)))
                         }
+                    } else {
+                        return Err(format!("Cannot invoke function via ptr: The stack is empty"))
                     }
                 }
                 Instruction::PushFunctionAsClosurePtr(args, return_type) => {
@@ -2892,7 +3026,7 @@ impl VirtualMachine {
                         .stored_closures
                         .get(self.stored_closures.len() - 1)
                         .unwrap();
-                    self.stack
+                    stack
                         .push(Value::Function(reference as *const Function));
                 }
                 Instruction::Cast(t) => match t {
@@ -2902,31 +3036,31 @@ impl VirtualMachine {
                     | Types::PtrWrapper
                     | Types::Any => {
                         if self.is_catching {
-                            self.stack
+                            stack
                                 .push(Value::Error(format!("Cannot cast value into {:?}", t)));
                         } else {
                             return Err(format!("Cannot cast value into {:?}", t));
                         }
                     }
                     Types::Int | Types::BigInt | Types::Float | Types::LFloat => {
-                        if let Some(val) = self.stack.pop() {
+                        if let Some(val) = stack.pop() {
                             match val {
                                 Value::Int(i) => match t {
                                     Types::Int => {
-                                        self.stack.push(Value::Int(i));
+                                        stack.push(Value::Int(i));
                                     }
                                     Types::BigInt => {
-                                        self.stack.push(Value::BigInt(i64::from(i)));
+                                        stack.push(Value::BigInt(i64::from(i)));
                                     }
                                     Types::Float => {
-                                        self.stack.push(Value::Float(i as f64));
+                                        stack.push(Value::Float(i as f64));
                                     }
                                     Types::LFloat => {
-                                        self.stack.push(Value::LFloat(i as f32));
+                                        stack.push(Value::LFloat(i as f32));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
+                                            stack.push(Value::Error(format!(
                                                 "Cannot cast value into {:?}: Invalid target type",
                                                 t
                                             )));
@@ -2941,10 +3075,10 @@ impl VirtualMachine {
                                 Value::BigInt(i) => match t {
                                     Types::Int => {
                                         if let Some(casted) = i.try_into().ok() {
-                                            self.stack.push(Value::Int(casted));
+                                            stack.push(Value::Int(casted));
                                         } else {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Overflow or underflow occurred",
                                                             t
                                                         )));
@@ -2957,17 +3091,17 @@ impl VirtualMachine {
                                         }
                                     }
                                     Types::BigInt => {
-                                        self.stack.push(Value::BigInt(i));
+                                        stack.push(Value::BigInt(i));
                                     }
                                     Types::Float => {
-                                        self.stack.push(Value::Float(i as f64));
+                                        stack.push(Value::Float(i as f64));
                                     }
                                     Types::LFloat => {
-                                        self.stack.push(Value::LFloat(i as f32));
+                                        stack.push(Value::LFloat(i as f32));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
+                                            stack.push(Value::Error(format!(
                                                 "Cannot cast value into {:?}: Invalid target type",
                                                 t
                                             )));
@@ -2982,10 +3116,10 @@ impl VirtualMachine {
                                 Value::Float(f) => match t {
                                     Types::Int => {
                                         if let Ok(casted) = i32::try_from(f as i64) {
-                                            self.stack.push(Value::Int(casted));
+                                            stack.push(Value::Int(casted));
                                         } else {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Overflow or underflow occurred",
                                                             t
                                                         )));
@@ -2998,17 +3132,17 @@ impl VirtualMachine {
                                         }
                                     }
                                     Types::BigInt => {
-                                        self.stack.push(Value::BigInt(f as i64));
+                                        stack.push(Value::BigInt(f as i64));
                                     }
                                     Types::Float => {
-                                        self.stack.push(Value::Float(f));
+                                        stack.push(Value::Float(f));
                                     }
                                     Types::LFloat => {
-                                        self.stack.push(Value::LFloat(f as f32));
+                                        stack.push(Value::LFloat(f as f32));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
+                                            stack.push(Value::Error(format!(
                                                 "Cannot cast value into {:?}: Invalid target type",
                                                 t
                                             )));
@@ -3023,10 +3157,10 @@ impl VirtualMachine {
                                 Value::LFloat(f) => match t {
                                     Types::Int => {
                                         if let Ok(casted) = i32::try_from(f as i64) {
-                                            self.stack.push(Value::Int(casted));
+                                            stack.push(Value::Int(casted));
                                         } else {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Overflow or underflow occurred",
                                                             t
                                                         )));
@@ -3039,17 +3173,17 @@ impl VirtualMachine {
                                         }
                                     }
                                     Types::BigInt => {
-                                        self.stack.push(Value::BigInt(f as i64));
+                                        stack.push(Value::BigInt(f as i64));
                                     }
                                     Types::Float => {
-                                        self.stack.push(Value::Float(f as f64));
+                                        stack.push(Value::Float(f as f64));
                                     }
                                     Types::LFloat => {
-                                        self.stack.push(Value::LFloat(f));
+                                        stack.push(Value::LFloat(f));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
+                                            stack.push(Value::Error(format!(
                                                 "Cannot cast value into {:?}: Invalid target type",
                                                 t
                                             )));
@@ -3064,23 +3198,23 @@ impl VirtualMachine {
                                 Value::Boolean(b) => match t {
                                     Types::Int => {
                                         let i = if b { 1 } else { 0 };
-                                        self.stack.push(Value::Int(i));
+                                        stack.push(Value::Int(i));
                                     }
                                     Types::BigInt => {
                                         let i = if b { 1 } else { 0 };
-                                        self.stack.push(Value::BigInt(i.into()));
+                                        stack.push(Value::BigInt(i.into()));
                                     }
                                     Types::Float => {
                                         let f = if b { 1.0 } else { 0.0 };
-                                        self.stack.push(Value::Float(f));
+                                        stack.push(Value::Float(f));
                                     }
                                     Types::LFloat => {
                                         let f = if b { 1.0 } else { 0.0 };
-                                        self.stack.push(Value::LFloat(f as f32));
+                                        stack.push(Value::LFloat(f as f32));
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
+                                            stack.push(Value::Error(format!(
                                                 "Cannot cast value into {:?}: Invalid target type",
                                                 t
                                             )));
@@ -3095,10 +3229,10 @@ impl VirtualMachine {
                                 Value::String(s) => match t {
                                     Types::Int => {
                                         if let Ok(parsed) = s.parse::<i32>() {
-                                            self.stack.push(Value::Int(parsed));
+                                            stack.push(Value::Int(parsed));
                                         } else {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Failed to parse string as integer",
                                                             t
                                                         )));
@@ -3112,10 +3246,10 @@ impl VirtualMachine {
                                     }
                                     Types::BigInt => {
                                         if let Ok(parsed) = s.parse::<i64>() {
-                                            self.stack.push(Value::BigInt(parsed));
+                                            stack.push(Value::BigInt(parsed));
                                         } else {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Failed to parse string as big integer",
                                                             t
                                                         )));
@@ -3129,10 +3263,10 @@ impl VirtualMachine {
                                     }
                                     Types::Float => {
                                         if let Ok(parsed) = s.parse::<f64>() {
-                                            self.stack.push(Value::Float(parsed));
+                                            stack.push(Value::Float(parsed));
                                         } else {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Failed to parse string as float",
                                                             t
                                                         )));
@@ -3146,10 +3280,10 @@ impl VirtualMachine {
                                     }
                                     Types::LFloat => {
                                         if let Ok(parsed) = s.parse::<f32>() {
-                                            self.stack.push(Value::LFloat(parsed));
+                                            stack.push(Value::LFloat(parsed));
                                         } else {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Failed to parse string as long float",
                                                             t
                                                         )));
@@ -3163,7 +3297,7 @@ impl VirtualMachine {
                                     }
                                     _ => {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
+                                            stack.push(Value::Error(format!(
                                                 "Cannot cast value into {:?}: Invalid target type",
                                                 t
                                             )));
@@ -3179,14 +3313,14 @@ impl VirtualMachine {
                                     let s = c.to_string();
                                     match t {
                                         Types::String => {
-                                            self.stack.push(Value::String(s));
+                                            stack.push(Value::String(s));
                                         }
                                         Types::Int => {
                                             if let Some(parsed) = s.parse::<i32>().ok() {
-                                                self.stack.push(Value::Int(parsed));
+                                                stack.push(Value::Int(parsed));
                                             } else {
                                                 if self.is_catching {
-                                                    self.stack.push(Value::Error(format!(
+                                                    stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Failed to parse character as integer",
                                                             t
                                                         )));
@@ -3200,10 +3334,10 @@ impl VirtualMachine {
                                         }
                                         Types::BigInt => {
                                             if let Some(parsed) = s.parse::<i64>().ok() {
-                                                self.stack.push(Value::BigInt(parsed));
+                                                stack.push(Value::BigInt(parsed));
                                             } else {
                                                 if self.is_catching {
-                                                    self.stack.push(Value::Error(format!(
+                                                    stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Failed to parse character as big integer",
                                                             t
                                                         )));
@@ -3217,10 +3351,10 @@ impl VirtualMachine {
                                         }
                                         Types::Float => {
                                             if let Some(parsed) = s.parse::<f64>().ok() {
-                                                self.stack.push(Value::Float(parsed));
+                                                stack.push(Value::Float(parsed));
                                             } else {
                                                 if self.is_catching {
-                                                    self.stack.push(Value::Error(format!(
+                                                    stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Failed to parse character as float",
                                                             t
                                                         )));
@@ -3234,10 +3368,10 @@ impl VirtualMachine {
                                         }
                                         Types::LFloat => {
                                             if let Some(parsed) = s.parse::<f32>().ok() {
-                                                self.stack.push(Value::LFloat(parsed));
+                                                stack.push(Value::LFloat(parsed));
                                             } else {
                                                 if self.is_catching {
-                                                    self.stack.push(Value::Error(format!(
+                                                    stack.push(Value::Error(format!(
                                                             "Cannot cast value into {:?}: Failed to parse character as long float",
                                                             t
                                                         )));
@@ -3251,7 +3385,7 @@ impl VirtualMachine {
                                         }
                                         _ => {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                         "Cannot cast value into {:?}: Invalid target type",
                                                         t
                                                     )));
@@ -3266,7 +3400,7 @@ impl VirtualMachine {
                                 }
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Cannot cast value into {:?}: Invalid source type",
                                             val
                                         )));
@@ -3280,7 +3414,7 @@ impl VirtualMachine {
                             }
                         } else {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Cannot cast value into {:?}: The stack is empty",
                                     t
                                 )));
@@ -3294,7 +3428,7 @@ impl VirtualMachine {
                     }
                     _ => {
                         if self.is_catching {
-                            self.stack.push(Value::Error(format!(
+                            stack.push(Value::Error(format!(
                                 "Cannot cast value into {:?}: Invalid target type",
                                 t
                             )));
@@ -3314,11 +3448,11 @@ impl VirtualMachine {
                             self.file_handles_names.push_back(name.clone());
                             let len = self.file_handles.len();
                             let file_pointer = &mut self.file_handles.get_mut(len - 1).unwrap().0 as *mut File;
-                            self.stack.push(Value::FileHandle((file_pointer, false)));
+                            stack.push(Value::FileHandle((file_pointer, false)));
                         }
                         Err(err) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Error creating read file handle: {}", err
                                 )));
                             } else {
@@ -3337,11 +3471,11 @@ impl VirtualMachine {
                             self.file_handles_names.push_back(name.clone());
                             let len = self.file_handles.len();
                             let file_pointer = &mut self.file_handles.get_mut(len - 1).unwrap().0 as *mut File;
-                            self.stack.push(Value::FileHandle((file_pointer, true)));
+                            stack.push(Value::FileHandle((file_pointer, true)));
                         }
                         Err(err) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Error creating write file handle: {}", err
                                 )));
                             } else {
@@ -3361,12 +3495,12 @@ impl VirtualMachine {
                         }
                         Err(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The file handle for '{}' is not opened.", name
+                                stack.push(Value::Error(format!(
+                                    "The file handle for `{}` is not opened.", name
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The file handle for '{}' is not opened.", name
+                                    "The file handle for `{}` is not opened.", name
                                 ));
                             }
                         }
@@ -3377,34 +3511,34 @@ impl VirtualMachine {
                     match indexof {
                         Ok(index) => {
                             let (handle, is_writeable) = self.file_handles.get_mut(index).unwrap();
-                            self.stack.push(Value::FileHandle((handle as *mut File, *is_writeable)));
+                            stack.push(Value::FileHandle((handle as *mut File, *is_writeable)));
                         }
                         Err(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The file handle for '{}' is not opened.", name
+                                stack.push(Value::Error(format!(
+                                    "The file handle for `{}` is not opened.", name
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The file handle for '{}' is not opened.", name
+                                    "The file handle for `{}` is not opened.", name
                                 ));
                             }
                         }
                     }
                 }
                 Instruction::ReadFromFileHandle(bytes) => {
-                    match self.stack.pop() {
+                    match stack.pop() {
                         Some(Value::FileHandle((handle, _))) => {
                             let reference = unsafe { handle.as_mut().unwrap() };
                             let mut buffer = Vec::with_capacity(*bytes);
                             let res = reference.read_exact(&mut buffer);
                             match res {
                                 Ok(_) => {
-                                    self.stack.push(Value::Bytes(buffer));
+                                    stack.push(Value::Bytes(buffer));
                                 }
                                 Err(e) => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Error reading {} bytes from file handle: {}", bytes, e
                                         )));
                                     } else {
@@ -3417,7 +3551,7 @@ impl VirtualMachine {
                         }
                         Some(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Tried to read from a non-File handle object"
                                 )));
                             } else {
@@ -3428,30 +3562,30 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The stack is empty"
+                                stack.push(Value::Error(format!(
+                                    "The stack is empty (at reading {} bytes from file handle with dynamic name from stack)", bytes
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The stack is empty"
+                                    "The stack is empty (at reading {} bytes from file handle with dynamic name from stack)", bytes
                                 ));
                             }
                         }
                     }
                 }
                 Instruction::ReadFileHandleToString => {
-                    match self.stack.pop() {
+                    match stack.pop() {
                         Some(Value::FileHandle((handle, _))) => {
                             let reference = unsafe { handle.as_mut().unwrap() };
                             let mut buffer = String::new();
                             let res = reference.read_to_string(&mut buffer);
                             match res {
                                 Ok(_) => {
-                                    self.stack.push(Value::String(buffer));
+                                    stack.push(Value::String(buffer));
                                 }
                                 Err(e) => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Error reading file handle to string: {}", e
                                         )));
                                     } else {
@@ -3464,7 +3598,7 @@ impl VirtualMachine {
                         }
                         Some(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Tried to read from a non-File handle object"
                                 )));
                             } else {
@@ -3475,30 +3609,30 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The stack is empty"
+                                stack.push(Value::Error(format!(
+                                    "The stack is empty (at reading from file handle with dynamic name from stack to string)"
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The stack is empty"
+                                    "The stack is empty (at reading from file handle with dynamic name from stack to string)"
                                 ));
                             }
                         }
                     }
                 }
                 Instruction::ReadFileHandleToBytes => {
-                    match self.stack.pop() {
+                    match stack.pop() {
                         Some(Value::FileHandle((handle, _))) => {
                             let reference = unsafe { handle.as_mut().unwrap() };
                             let mut buffer = Vec::new();
                             let res = reference.read_to_end(&mut buffer);
                             match res {
                                 Ok(_) => {
-                                    self.stack.push(Value::Bytes(buffer));
+                                    stack.push(Value::Bytes(buffer));
                                 }
                                 Err(e) => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Error reading file handle to bytes: {}", e
                                         )));
                                     } else {
@@ -3511,7 +3645,7 @@ impl VirtualMachine {
                         }
                         Some(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Tried to read from a non-File handle object"
                                 )));
                             } else {
@@ -3522,27 +3656,27 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The stack is empty"
+                                stack.push(Value::Error(format!(
+                                    "The stack is empty (at reading from file handle with dynamic name from stack to bytes)"
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The stack is empty"
+                                    "The stack is empty (at reading from file handle with dynamic name from stack to bytes)"
                                 ));
                             }
                         }
                     }
                 }
                 Instruction::WriteStringToFileHandle => {
-                    let string = self.stack.pop();
-                    let file_ref = self.stack.pop();
+                    let string = stack.pop();
+                    let file_ref = stack.pop();
                     match string {
                         Some(Value::String(s)) => {
                             match file_ref {
                                 Some(Value::FileHandle((handle, is_writeable))) => {
                                     if !is_writeable {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
+                                            stack.push(Value::Error(format!(
                                                 "The specified file handle is not writeable"
                                             )));
                                         } else {
@@ -3556,7 +3690,7 @@ impl VirtualMachine {
                                         match res {
                                             Err(err) => {
                                                 if self.is_catching {
-                                                    self.stack.push(Value::Error(format!(
+                                                    stack.push(Value::Error(format!(
                                                         "Error writing to file handle: {}", err
                                                     )));
                                                 } else {
@@ -3571,7 +3705,7 @@ impl VirtualMachine {
                                 }
                                 Some(_) => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Expected a file handle to write to"
                                         )));
                                     } else {
@@ -3582,12 +3716,12 @@ impl VirtualMachine {
                                 }
                                 None => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "The stack is empty"
+                                        stack.push(Value::Error(format!(
+                                            "The stack is empty (at collecting file handle from stack)"
                                         )));
                                     } else {
                                         return Err(format!(
-                                            "The stack is empty"
+                                            "The stack is empty (at collecting file handle from stack)"
                                         ));
                                     }
                                 }
@@ -3595,7 +3729,7 @@ impl VirtualMachine {
                         }
                         Some(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Expected string to write to a file handle"
                                 )));
                             } else {
@@ -3606,27 +3740,27 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The stack is empty"
+                                stack.push(Value::Error(format!(
+                                    "The stack is empty (at collecting string from stack)"
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The stack is empty"
+                                    "The stack is empty (at collecting string from stack)"
                                 ));
                             }
                         }
                     }
                 }
                 Instruction::WriteBytesToFileHandle => {
-                    let bytes = self.stack.pop();
-                    let file_ref = self.stack.pop();
+                    let bytes = stack.pop();
+                    let file_ref = stack.pop();
                     match bytes {
                         Some(Value::Bytes(b)) => {
                             match file_ref {
                                 Some(Value::FileHandle((handle, is_writeable))) => {
                                     if !is_writeable {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
+                                            stack.push(Value::Error(format!(
                                                 "The specified file handle is not writeable"
                                             )));
                                         } else {
@@ -3640,7 +3774,7 @@ impl VirtualMachine {
                                         match res {
                                             Err(err) => {
                                                 if self.is_catching {
-                                                    self.stack.push(Value::Error(format!(
+                                                    stack.push(Value::Error(format!(
                                                         "Error writing to file handle: {}", err
                                                     )));
                                                 } else {
@@ -3655,7 +3789,7 @@ impl VirtualMachine {
                                 }
                                 Some(_) => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Expected a file handle to write to"
                                         )));
                                     } else {
@@ -3666,12 +3800,12 @@ impl VirtualMachine {
                                 }
                                 None => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "The stack is empty"
+                                        stack.push(Value::Error(format!(
+                                            "The stack is empty (at collecting file handle from stack)"
                                         )));
                                     } else {
                                         return Err(format!(
-                                            "The stack is empty"
+                                            "The stack is empty (at collecting file handle from stack)"
                                         ));
                                     }
                                 }
@@ -3679,7 +3813,7 @@ impl VirtualMachine {
                         }
                         Some(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Expected bytes to write to a file handle"
                                 )));
                             } else {
@@ -3690,31 +3824,33 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The stack is empty"
+                                stack.push(Value::Error(format!(
+                                    "The stack is empty (at collecting string from stack)"
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The stack is empty"
+                                    "The stack is empty (at collecting string from stack)"
                                 ));
                             }
                         }
                     }
                 }
                 Instruction::RestoreSequestratedVariables => {
-                    if let Some(v) = self.sequestrated_variables.pop() {
-                        self.variables = v;
+                    if let Some(mut v) = self.sequestrated_variables.pop() {
+                        let mut variables = self.variables.get_mut();
+                        variables = &mut v;
                     } else {
                         return Err(format!("Could not restore variables: variables are not actually sequestrated"));
                     }
                 }
                 Instruction::SequestrateVariables => {
-                    let cloned = self.variables.clone();
-                    self.variables.clear();
+                    let cloned = self.variables.get_mut().clone();
+                    let mut variables = self.variables.borrow_mut();
+                    variables.clear();
                     self.sequestrated_variables.push(cloned);
                 }
                 Instruction::GetReadFileHandleStack => {
-                    match self.stack.pop() {
+                    match stack.pop() {
                         Some(Value::String(name)) => {
                             let res = File::open(&name);
                             match res {
@@ -3723,11 +3859,11 @@ impl VirtualMachine {
                                     self.file_handles_names.push_back(name.clone());
                                     let len = self.file_handles.len();
                                     let file_pointer = &mut self.file_handles.get_mut(len - 1).unwrap().0 as *mut File;
-                                    self.stack.push(Value::FileHandle((file_pointer, false)));
+                                    stack.push(Value::FileHandle((file_pointer, false)));
                                 }
                                 Err(err) => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Error creating read file handle: {}", err
                                         )));
                                     } else {
@@ -3740,7 +3876,7 @@ impl VirtualMachine {
                         }
                         Some(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Expected a string for opening the file handle"
                                 )));
                             } else {
@@ -3751,19 +3887,19 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The stack is empty"
+                                stack.push(Value::Error(format!(
+                                    "The stack is empty (at getting read file handle for file from stack)"
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The stack is empty"
+                                    "The stack is empty (at getting read file handle for file from stack)"
                                 ));
                             }
                         }
                     }
                 }
                 Instruction::GetWriteFileHandleStack => {
-                    match self.stack.pop() {
+                    match stack.pop() {
                         Some(Value::String(name)) => {
                             let res = File::options().read(true).write(true).create(true).open(&name);
                             match res {
@@ -3772,11 +3908,11 @@ impl VirtualMachine {
                                     self.file_handles_names.push_back(name.clone());
                                     let len = self.file_handles.len();
                                     let file_pointer = &mut self.file_handles.get_mut(len - 1).unwrap().0 as *mut File;
-                                    self.stack.push(Value::FileHandle((file_pointer, true)));
+                                    stack.push(Value::FileHandle((file_pointer, true)));
                                 }
                                 Err(err) => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Error creating write file handle: {}", err
                                         )));
                                     } else {
@@ -3789,7 +3925,7 @@ impl VirtualMachine {
                         }
                         Some(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Expected a string for opening the file handle"
                                 )));
                             } else {
@@ -3800,19 +3936,19 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The stack is empty"
+                                stack.push(Value::Error(format!(
+                                    "The stack is empty (at getting write file handle for file from stack)"
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The stack is empty"
+                                    "The stack is empty (at getting write file handle for file from stack)"
                                 ));
                             }
                         }
                     }
                 }
                 Instruction::CloseFileHandleStack => {
-                    match self.stack.pop() {
+                    match stack.pop() {
                         Some(Value::String(name)) => {
                             let indexof = self.file_handles_names.binary_search(&name);
                             match indexof {
@@ -3822,12 +3958,12 @@ impl VirtualMachine {
                                 }
                                 Err(_) => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "The file handle for '{}' is not opened.", name
+                                        stack.push(Value::Error(format!(
+                                            "The file handle for `{}` is not opened.", name
                                         )));
                                     } else {
                                         return Err(format!(
-                                            "The file handle for '{}' is not opened.", name
+                                            "The file handle for `{}` is not opened.", name
                                         ));
                                     }
                                 }
@@ -3835,7 +3971,7 @@ impl VirtualMachine {
                         }
                         Some(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Expected a string for closening the file handle"
                                 )));
                             } else {
@@ -3846,23 +3982,23 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The stack is empty"
+                                stack.push(Value::Error(format!(
+                                    "The stack is empty (at closing file handle for file from stack)"
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The stack is empty"
+                                    "The stack is empty (at closing file handle for file from stack)"
                                 ));
                             }
                         }
                     }
                 }
                 Instruction::ReadFromFileHandleStack => {
-                    match self.stack.pop() {
+                    match stack.pop() {
                         Some(Value::Int(bytes)) => {
                             if bytes < 1 {
                                 if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
+                                    stack.push(Value::Error(format!(
                                         "Cannot read negative bytes: {}", bytes
                                     )));
                                 } else {
@@ -3871,18 +4007,18 @@ impl VirtualMachine {
                                     ));
                                 }
                             }
-                            match self.stack.pop() {
+                            match stack.pop() {
                                 Some(Value::FileHandle((handle, _))) => {
                                     let reference = unsafe { handle.as_mut().unwrap() };
                                     let mut buffer = Vec::with_capacity(bytes as usize);
                                     let res = reference.read_exact(&mut buffer);
                                     match res {
                                         Ok(_) => {
-                                            self.stack.push(Value::Bytes(buffer));
+                                            stack.push(Value::Bytes(buffer));
                                         }
                                         Err(e) => {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                     "Error reading {} bytes from file handle: {}", bytes, e
                                                 )));
                                             } else {
@@ -3895,7 +4031,7 @@ impl VirtualMachine {
                                 }
                                 Some(_) => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Tried to read from a non-File handle object"
                                         )));
                                     } else {
@@ -3906,12 +4042,12 @@ impl VirtualMachine {
                                 }
                                 None => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "The stack is empty"
+                                        stack.push(Value::Error(format!(
+                                            "The stack is empty (at reading from stack file handle)"
                                         )));
                                     } else {
                                         return Err(format!(
-                                            "The stack is empty"
+                                            "The stack is empty (at reading from stack file handle)"
                                         ));
                                     }
                                 }
@@ -3919,7 +4055,7 @@ impl VirtualMachine {
                         }
                         Some(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Expected a int for reading the file handle"
                                 )));
                             } else {
@@ -3930,34 +4066,34 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The stack is empty"
+                                stack.push(Value::Error(format!(
+                                    "The stack is empty (at reading from stack file handle)"
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The stack is empty"
+                                    "The stack is empty (at reading from stack file handle)"
                                 ));
                             }
                         }
                     }
                 }
                 Instruction::PushFileHandlePointerStack => {
-                    match self.stack.pop() {
+                    match stack.pop() {
                         Some(Value::String(name)) => {
                             let indexof = self.file_handles_names.binary_search(&name);
                             match indexof {
                                 Ok(index) => {
                                     let (handle, is_writeable) = self.file_handles.get_mut(index).unwrap();
-                                    self.stack.push(Value::FileHandle((handle as *mut File, *is_writeable)));
+                                    stack.push(Value::FileHandle((handle as *mut File, *is_writeable)));
                                 }
                                 Err(_) => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "The file handle for '{}' is not opened.", name
+                                        stack.push(Value::Error(format!(
+                                            "The file handle for `{}` is not opened.", name
                                         )));
                                     } else {
                                         return Err(format!(
-                                            "The file handle for '{}' is not opened.", name
+                                            "The file handle for `{}` is not opened.", name
                                         ));
                                     }
                                 }
@@ -3965,7 +4101,7 @@ impl VirtualMachine {
                         }
                         Some(_) => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Expected a string for closening the file handle"
                                 )));
                             } else {
@@ -3976,12 +4112,12 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The stack is empty"
+                                stack.push(Value::Error(format!(
+                                    "The stack is empty (at pushing file handle to the stack by its name)"
                                 )));
                             } else {
                                 return Err(format!(
-                                    "The stack is empty"
+                                    "The stack is empty (at pushing file handle to the stack by its name)"
                                 ));
                             }
                         }
@@ -4022,7 +4158,7 @@ impl VirtualMachine {
                                             break;
                                         }
                                         _ => {
-                                            return Err(format!("Formatation error: unclosed class public fields definition"))
+                                            return Err(format!("Formatation error: unexpected instruction inside class public fields definition: {:?}", self.instructions.get(self.pc as usize)))
                                         }
                                     }
                                 }
@@ -4044,7 +4180,7 @@ impl VirtualMachine {
                                             break;
                                         }
                                         _ => {
-                                            return Err(format!("Formatation error: unclosed class private fields definition"))
+                                            return Err(format!("Formatation error: unexpected instruction inside class private fields definition: {:?}", self.instructions.get(self.pc as usize)))
                                         }
                                     }
                                 }
@@ -4102,7 +4238,7 @@ impl VirtualMachine {
                                             break;
                                         }
                                         _ => {
-                                            return Err(format!("Formatation error: unclosed class public fields definition"))
+                                            return Err(format!("Formatation error: unclosed class public methods definition"))
                                         }
                                     }
                                 }
@@ -4158,7 +4294,7 @@ impl VirtualMachine {
                                             break;
                                         }
                                         _ => {
-                                            return Err(format!("Formatation error: unclosed class private fields definition"))
+                                            return Err(format!("Formatation error: unclosed class private methods definition"))
                                         }
                                     }
                                 }
@@ -4168,8 +4304,10 @@ impl VirtualMachine {
                             }
                             Instruction::ConstructorFunctionDefinition(args, return_type) => {
                                 let mut body: Vec<Instruction> = vec![];
+                                body.push(Instruction::SequestrateVariables);
                                 body.push(Instruction::Push(Value::String(format!("{}.__new__", object.name))));
                                 body.push(Instruction::PopToRoot(String::from("__function__")));
+                                body.push(Instruction::AllocArgsToLocal);
                                 self.pc += 1;
                                 while let Some(instruction) = self.instructions.get(self.pc as usize) {
                                     match instruction {
@@ -4273,20 +4411,11 @@ impl VirtualMachine {
                     match self.classes.get_mut(name) {
                         Some(class) => {
                             self.current_object = Some(class as *mut Class);
-                            self.instructions
-                                        .drain((self.pc - 2) as usize..(self.pc as usize));
-                            let mut other_part = self
-                                .instructions
-                                .drain((self.pc as usize - 1)..)
-                                .collect::<VecDeque<Instruction>>();
-                            self.instructions.push_back(Instruction::InvokeStaticMethod(String::from("__new__")));
-                            self.instructions.push_back(Instruction::InvokeStaticMethod(String::from("__new__")));
-                            self.instructions.push_back(Instruction::InvokeStaticMethod(String::from("__new__")));
-                            self.instructions.append(&mut other_part);
+                            self.instructions.insert(self.pc as usize + 1, Instruction::InvokeStaticMethod(String::from("__new__")));
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Unable to instantiate unexistant class {}", name
                                 )));
                                 continue;
@@ -4313,11 +4442,11 @@ impl VirtualMachine {
                             let reference = unsafe { class.as_mut().unwrap() };
                             match reference.public_properties.get(name) {
                                 Some((value, _)) => {
-                                    self.stack.push(value.clone());
+                                    stack.push(value.clone());
                                 }
                                 None => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Class {} does not have a public property {}", reference.name, name
                                         )));
                                         continue;
@@ -4331,7 +4460,7 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Unable to load: current object not set"
                                 )));
                                 continue;
@@ -4349,11 +4478,11 @@ impl VirtualMachine {
                             let reference = unsafe { class.as_mut().unwrap() };
                             match reference.private_properties.get(name) {
                                 Some((value, _)) => {
-                                    self.stack.push(value.clone());
+                                    stack.push(value.clone());
                                 }
                                 None => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Class {} does not have a private property {}", reference.name, name
                                         )));
                                         continue;
@@ -4367,7 +4496,7 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Unable to load: current object not set"
                                 )));
                                 continue;
@@ -4385,7 +4514,7 @@ impl VirtualMachine {
                             let reference = unsafe { class.as_mut().unwrap() };
                             if !reference.public_properties.contains_key(name) {
                                 if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
+                                    stack.push(Value::Error(format!(
                                         "Class {} does not contain a public property {}", reference.name, name
                                     )));
                                     continue;
@@ -4399,7 +4528,7 @@ impl VirtualMachine {
                                     (_, type_) => {
                                         if let Err(err) = type_check_value(vec![value.clone()], vec![(String::from("class_property_placeholder"), type_.clone())]) {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                     "Error during typechecking property value: {}", err
                                                 )));
                                                 continue;
@@ -4415,7 +4544,7 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Unable to load: current object not set"
                                 )));
                                 continue;
@@ -4433,7 +4562,7 @@ impl VirtualMachine {
                             let reference = unsafe { class.as_mut().unwrap() };
                             if !reference.private_properties.contains_key(name) {
                                 if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
+                                    stack.push(Value::Error(format!(
                                         "Class {} does not contain a private property {}", reference.name, name
                                     )));
                                     continue;
@@ -4447,7 +4576,7 @@ impl VirtualMachine {
                                     (_, type_) => {
                                         if let Err(err) = type_check_value(vec![value.clone()], vec![(String::from("class_property_placeholder"), type_.clone())]) {
                                             if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
+                                                stack.push(Value::Error(format!(
                                                     "Error during typechecking property value: {}", err
                                                 )));
                                                 continue;
@@ -4463,7 +4592,7 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Unable to load: current object not set"
                                 )));
                                 continue;
@@ -4476,14 +4605,14 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::SetThisStackPublic(name) => {
-                    match self.stack.pop() {
+                    match stack.pop() {
                         Some(value) => {
                             match self.current_object {
                                 Some(class) => {
                                     let reference = unsafe { class.as_mut().unwrap() };
                                     if !reference.public_properties.contains_key(name) {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
+                                            stack.push(Value::Error(format!(
                                                 "Class {} does not contain a public property {}", reference.name, name
                                             )));
                                             continue;
@@ -4497,7 +4626,7 @@ impl VirtualMachine {
                                             (_, type_) => {
                                                 if let Err(err) = type_check_value(vec![value.clone()], vec![(String::from("class_property_placeholder"), type_.clone())]) {
                                                     if self.is_catching {
-                                                        self.stack.push(Value::Error(format!(
+                                                        stack.push(Value::Error(format!(
                                                             "Error during typechecking property value: {}", err
                                                         )));
                                                         continue;
@@ -4513,7 +4642,7 @@ impl VirtualMachine {
                                 }
                                 None => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Unable to load: current object not set"
                                         )));
                                         continue;
@@ -4527,7 +4656,7 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "The stack is empty"
                                 )));
                                 continue;
@@ -4540,14 +4669,14 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::SetThisStackPrivate(name) => {
-                    match self.stack.pop() {
+                    match stack.pop() {
                         Some(value) => {
                             match self.current_object {
                                 Some(class) => {
                                     let reference = unsafe { class.as_mut().unwrap() };
                                     if !reference.private_properties.contains_key(name) {
                                         if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
+                                            stack.push(Value::Error(format!(
                                                 "Class {} does not contain a private property {}", reference.name, name
                                             )));
                                             continue;
@@ -4561,7 +4690,7 @@ impl VirtualMachine {
                                             (_, type_) => {
                                                 if let Err(err) = type_check_value(vec![value.clone()], vec![(String::from("class_property_placeholder"), type_.clone())]) {
                                                     if self.is_catching {
-                                                        self.stack.push(Value::Error(format!(
+                                                        stack.push(Value::Error(format!(
                                                             "Error during typechecking property value: {}", err
                                                         )));
                                                         continue;
@@ -4577,7 +4706,7 @@ impl VirtualMachine {
                                 }
                                 None => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Unable to load: current object not set"
                                         )));
                                         continue;
@@ -4591,7 +4720,7 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "The stack is empty"
                                 )));
                                 continue;
@@ -4604,7 +4733,8 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::SetCurrentObject(name) => {
-                    match self.variables.get(name) {
+                    let variables = self.variables.borrow();
+                    match variables.get(name) {
                         Some(value) => {
                             let reference = unsafe { (*value as *mut Value).as_mut().unwrap() };
                             match reference {
@@ -4614,7 +4744,7 @@ impl VirtualMachine {
                                 }
                                 _ => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "{} is not a class", name
                                         )));
                                         continue;
@@ -4628,7 +4758,7 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Cannot set current object to undefined variable {}", name
                                 )));
                                 continue;
@@ -4657,13 +4787,13 @@ impl VirtualMachine {
                                                 match result {
                                                     Value::Error(e) => {
                                                         if self.is_catching {
-                                                            self.stack.push(Value::Error(e));
+                                                            stack.push(Value::Error(e));
                                                         } else {
                                                             return Err(e);
                                                         }
                                                     }
                                                     _ => {
-                                                        self.stack.push(result);
+                                                        stack.push(result);
                                                     }
                                                 }
                                         }
@@ -4672,7 +4802,7 @@ impl VirtualMachine {
                                                 if fun.name == self.last_runned {
                                                     self.recursive_level += 1;
                                                     if self.recursive_level >= self.max_recursiveness_level {
-                                                        return Err(format!("Max recursiveness level depth exceeded: Static function '{}' called itself {} times.", fun.name, self.recursive_level))
+                                                        return Err(format!("Max recursiveness level depth exceeded: Function `{}` called itself {} times.", fun.name, self.recursive_level))
                                                     }
                                                 } else {
                                                     self.recursive_level = 0;
@@ -4682,10 +4812,10 @@ impl VirtualMachine {
                                             let mut args: VecDeque<Value> = VecDeque::new();
                                             if self.args_stack.len() != fun.args.len() {
                                                 if self.is_catching {
-                                                    self.stack
-                                                        .push(Value::Error(String::from("The argument stack cannot fulfil the size of the static function's arguments.")));
+                                                    stack
+                                                        .push(Value::Error(String::from("The argument stack cannot fulfil the size of the function's arguments.")));
                                                 } else {
-                                                    return Err(String::from("The argument stack cannot fulfil the size of the static function's arguments."));
+                                                    return Err(String::from("The argument stack cannot fulfil the size of the function's arguments."));
                                                 }
                                             }
                                             if fun.args.len() != 0 {
@@ -4698,12 +4828,12 @@ impl VirtualMachine {
                                                 type_check_value(args.clone().into(), fun.args.clone());
                                             if let Err(err) = typechecks {
                                                 if self.is_catching {
-                                                    self.stack.push(Value::Error(err));
+                                                    stack.push(Value::Error(err));
                                                 } else {
                                                     return Err(err);
                                                 }
                                             } else {
-                                                self.stack_before = self.stack.clone();
+                                                self.stack_before = stack.clone();
                                                 self.expected_return_types.push(fun.returns.clone());
                                                 self.returns_to.push(self.pc + 1);
                                                 let fun_body_len = fun.body.len();
@@ -4716,7 +4846,7 @@ impl VirtualMachine {
                                                 self.instructions
                                                     .append(&mut VecDeque::from(fun.body.clone()));
                                                 self.instructions.append(&mut VecDeque::from(other_part));
-                                                self.block_len = (fun_body_len + 1) as i64;
+                                                self.block_len = fun_body_len as i64;
                                                 let zipped = fun.args.clone().into_iter();
                                                 let zipped = zipped.zip(args.into_iter());
                                                 let mut new_args = FxHashMap::default();
@@ -4724,7 +4854,7 @@ impl VirtualMachine {
                                                     new_args.insert(varname, value);
                                                 }
                                                 self.args_to_alloc.push(new_args);
-                                                self.check_labels_from_pc(fun_body_len);
+                                                self.check_labels_from_pc(self.pc as usize);
                                             }
                                         }
                                         _ => {
@@ -4734,13 +4864,13 @@ impl VirtualMachine {
                                 }
                                 None => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Class {} doesn't contain static method {}", reference.name, method
+                                        stack.push(Value::Error(format!(
+                                            "Class {} doesn't contain static method {}\n`{}` contains the static methods: {:?}", reference.name, method, reference.name, reference.static_methods.keys()
                                         )));
                                         continue;
                                     } else {
                                         return Err(format!(
-                                            "Class {} doesn't contain static method {}", reference.name, method
+                                            "Class {} doesn't contain static method {}\n`{}` contains the static methods: {:?}", reference.name, method, reference.name, reference.static_methods.keys()
                                         ));
                                     }
                                 }
@@ -4748,7 +4878,7 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Current object not set"
                                 )));
                                 continue;
@@ -4777,13 +4907,13 @@ impl VirtualMachine {
                                                 match result {
                                                     Value::Error(e) => {
                                                         if self.is_catching {
-                                                            self.stack.push(Value::Error(e));
+                                                            stack.push(Value::Error(e));
                                                         } else {
                                                             return Err(e);
                                                         }
                                                     }
                                                     _ => {
-                                                        self.stack.push(result);
+                                                        stack.push(result);
                                                     }
                                                 }
                                         }
@@ -4792,7 +4922,7 @@ impl VirtualMachine {
                                                 if fun.name == self.last_runned {
                                                     self.recursive_level += 1;
                                                     if self.recursive_level >= self.max_recursiveness_level {
-                                                        return Err(format!("Max recursiveness level depth exceeded: Public method '{}' called itself {} times.", fun.name, self.recursive_level))
+                                                        return Err(format!("Max recursiveness level depth exceeded: Public method `{}` called itself {} times.", fun.name, self.recursive_level))
                                                     }
                                                 } else {
                                                     self.recursive_level = 0;
@@ -4802,7 +4932,7 @@ impl VirtualMachine {
                                             let mut args: VecDeque<Value> = VecDeque::new();
                                             if self.args_stack.len() != fun.args.len() {
                                                 if self.is_catching {
-                                                    self.stack
+                                                    stack
                                                         .push(Value::Error(String::from("The argument stack cannot fulfil the size of the public method's arguments.")));
                                                 } else {
                                                     return Err(String::from("The argument stack cannot fulfil the size of the public method's arguments."));
@@ -4818,12 +4948,12 @@ impl VirtualMachine {
                                                 type_check_value(args.clone().into(), fun.args.clone());
                                             if let Err(err) = typechecks {
                                                 if self.is_catching {
-                                                    self.stack.push(Value::Error(err));
+                                                    stack.push(Value::Error(err));
                                                 } else {
                                                     return Err(err);
                                                 }
                                             } else {
-                                                self.stack_before = self.stack.clone();
+                                                self.stack_before = stack.clone();
                                                 self.expected_return_types.push(fun.returns.clone());
                                                 self.returns_to.push(self.pc + 1);
                                                 let fun_body_len = fun.body.len();
@@ -4854,13 +4984,13 @@ impl VirtualMachine {
                                 }
                                 None => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Class {} doesn't contain public method {}", reference.name, method
+                                        stack.push(Value::Error(format!(
+                                            "Class {} doesn't contain public method {}\n`{}` contains the methods: {:?}", reference.name, method, reference.name, reference.public_methods.keys()
                                         )));
                                         continue;
                                     } else {
                                         return Err(format!(
-                                            "Class {} doesn't contain public method {}", reference.name, method
+                                            "Class {} doesn't contain public method {}\n`{}` contains the methods: {:?}", reference.name, method, reference.name, reference.public_methods.keys()
                                         ));
                                     }
                                 }
@@ -4868,7 +4998,7 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Current object not set"
                                 )));
                                 continue;
@@ -4897,13 +5027,13 @@ impl VirtualMachine {
                                                 match result {
                                                     Value::Error(e) => {
                                                         if self.is_catching {
-                                                            self.stack.push(Value::Error(e));
+                                                            stack.push(Value::Error(e));
                                                         } else {
                                                             return Err(e);
                                                         }
                                                     }
                                                     _ => {
-                                                        self.stack.push(result);
+                                                        stack.push(result);
                                                     }
                                                 }
                                         }
@@ -4912,7 +5042,7 @@ impl VirtualMachine {
                                                 if fun.name == self.last_runned {
                                                     self.recursive_level += 1;
                                                     if self.recursive_level >= self.max_recursiveness_level {
-                                                        return Err(format!("Max recursiveness level depth exceeded: Private method '{}' called itself {} times.", fun.name, self.recursive_level))
+                                                        return Err(format!("Max recursiveness level depth exceeded: Private method `{}` called itself {} times.", fun.name, self.recursive_level))
                                                     }
                                                 } else {
                                                     self.recursive_level = 0;
@@ -4922,7 +5052,7 @@ impl VirtualMachine {
                                             let mut args: VecDeque<Value> = VecDeque::new();
                                             if self.args_stack.len() != fun.args.len() {
                                                 if self.is_catching {
-                                                    self.stack
+                                                    stack
                                                         .push(Value::Error(String::from("The argument stack cannot fulfil the size of the private method's arguments.")));
                                                 } else {
                                                     return Err(String::from("The argument stack cannot fulfil the size of the private method's arguments."));
@@ -4938,12 +5068,12 @@ impl VirtualMachine {
                                                 type_check_value(args.clone().into(), fun.args.clone());
                                             if let Err(err) = typechecks {
                                                 if self.is_catching {
-                                                    self.stack.push(Value::Error(err));
+                                                    stack.push(Value::Error(err));
                                                 } else {
                                                     return Err(err);
                                                 }
                                             } else {
-                                                self.stack_before = self.stack.clone();
+                                                self.stack_before = stack.clone();
                                                 self.expected_return_types.push(fun.returns.clone());
                                                 self.returns_to.push(self.pc + 1);
                                                 let fun_body_len = fun.body.len();
@@ -4974,7 +5104,7 @@ impl VirtualMachine {
                                 }
                                 None => {
                                     if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
+                                        stack.push(Value::Error(format!(
                                             "Class {} doesn't contain private method {}", reference.name, method
                                         )));
                                         continue;
@@ -4988,7 +5118,7 @@ impl VirtualMachine {
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Current object not set"
                                 )));
                                 continue;
@@ -5004,11 +5134,11 @@ impl VirtualMachine {
                     match self.current_object {
                         Some(obj) => {
                             let class = unsafe { std::ptr::read_volatile(obj) };
-                            self.stack.push(Value::Class(class));
+                            stack.push(Value::Class(class));
                         }
                         None => {
                             if self.is_catching {
-                                self.stack.push(Value::Error(format!(
+                                stack.push(Value::Error(format!(
                                     "Current object not set"
                                 )));
                                 continue;
@@ -5032,6 +5162,91 @@ impl VirtualMachine {
                         return Err(format!("No arguments to allocate"));
                     }
                 }
+                Instruction::DefineCoroutine(name) => {
+                    let mut body: Vec<Instruction> = vec![];
+                    self.pc += 1;
+                    while let Some(instruction) = self.instructions.get(self.pc as usize) {
+                        match instruction {
+                            Instruction::EndCoroutine => {
+                                break;
+                            }
+                            Instruction::DefineCoroutine(_) => {
+                                return Err(format!(
+                                    "Definition of coroutine inside a coroutine is not allowed."
+                                ))
+                            }
+                            _ => {
+                                body.push(instruction.clone());
+                                self.pc += 1;
+                            }
+                        }
+                    }
+                    self.coroutines.insert(name.clone(), body);
+                }
+                Instruction::EndCoroutine => {
+                    return Err(format!("EndCoroutine is not a standalone instruction."));
+                }
+                Instruction::RunCoroutine(name) => {
+                    if let Some(instructions) = self.coroutines.get(name) {
+                        let mut copied_handle = self.thread_cloned();
+                        copied_handle.instructions = instructions.clone().into();
+                        let static_handle: &'static mut VirtualMachine = Box::leak(Box::new(copied_handle));
+                        let starts_module_as_cloned = starts_module_as.clone();
+                        let static_handle_starts: &'static mut Arc<String> = Box::leak(Box::new(starts_module_as_cloned));
+                        let handle = std::thread::spawn(move || {
+                            static_handle.run(
+                                static_handle_starts.clone(),
+                                &*instant,
+                                timeout_milis.clone(),
+                                stdout_global,
+                                stderr_global,
+                            )
+                        });
+                        self.running_coroutines.push(Some(handle));
+                        stack.push(Value::Future(self.running_coroutines.len() - 1))
+                    } else {
+                        return Err(format!("Cannot summon nonexistent coroutine `{}`", name));
+                    }
+                }
+                Instruction::AwaitCoroutineFutureStack => {
+                    match stack.pop() {
+                        Some(Value::Future(index)) => {
+                            let coroutine = std::mem::replace(&mut self.running_coroutines[index], None);
+
+                            if let Some(coroutine) = coroutine {
+                                // Wait for the thread to complete and return its result
+                                match coroutine.join() {
+                                    Ok(joined_res) => {
+
+                                        match task::block_on(joined_res) {
+                                            Ok(value) => {
+                                                stack.push(value);
+                                            }
+                                            Err(err) => {
+                                                if self.is_catching {
+                                                    stack.push(Value::Error(err.to_string()));
+                                                } else {
+                                                    return Err(format!("{}", err));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        return Err(format!("Failed to join coroutine to thread main: {:?}", err));
+                                    }
+                                }
+                            } else {
+                                return Err(format!("Awaiting the same Future more than one time is not allowed"));
+                            }
+                        }
+                        Some(value) => {
+                            return Err(format!("Awaiting a non-Future type like `{}` is not allowed", value_to_readable(&value)));
+                        }
+                        None => {
+                            return Err(format!("The stack is empty (could not grab Future from stack at awaiting)"));
+                        }
+                    }
+                }                
             }
         }
         Ok(Value::None)

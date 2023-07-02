@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 use std::io::stdin;
 use std::io::{Read, Write};
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -514,25 +515,6 @@ pub fn get_natives() -> Vec<(String, Function)> {
         })),
     ));
     natives.push((
-        String::from("is_nullptr"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 1 {
-                Value::Error(String::from("is_nullptr requires exactly one argument"))
-            } else {
-                match &args[0] {
-                    Value::PtrWrapper(ptr) => {
-                        if ptr.is_null() {
-                            Value::Boolean(true)
-                        } else {
-                            Value::Boolean(false)
-                        }
-                    }
-                    _ => return Value::Boolean(false),
-                }
-            }
-        })),
-    ));
-    natives.push((
         String::from("readptr"),
         Function::Native(Arc::new(|args| {
             if args.len() < 1 {
@@ -540,13 +522,9 @@ pub fn get_natives() -> Vec<(String, Function)> {
             } else {
                 match &args[0] {
                     Value::PtrWrapper(ptr) => {
-                        if ptr.is_null() {
-                            return Value::Error(String::from("Tried to read from nullptr"));
-                        } else {
-                            unsafe {
-                                let result = std::ptr::read(*ptr as *const Value);
-                                return result;
-                            }
+                        unsafe {
+                            let result = std::ptr::read(ptr.as_ptr() as *const Value);
+                            return result;
                         }
                     }
                     _ => return Value::Error(String::from("Cannot read from a non-ptr type")),
@@ -562,12 +540,8 @@ pub fn get_natives() -> Vec<(String, Function)> {
             } else {
                 match &args[0] {
                     Value::PtrWrapper(ptr) => {
-                        if ptr.is_null() {
-                            return Value::Error(String::from("Tried to write to a nullptr"));
-                        } else {
-                            unsafe { std::ptr::write(*ptr, args[1].clone()) };
+                        unsafe { std::ptr::write(ptr.as_ptr(), args[1].clone()) };
                             return Value::None;
-                        }
                     }
                     _ => return Value::Error(String::from("Cannot write to a non-ptr type")),
                 }
@@ -582,19 +556,15 @@ pub fn get_natives() -> Vec<(String, Function)> {
             } else {
                 match &args[0] {
                     Value::PtrWrapper(ptr) => {
-                        if ptr.is_null() {
-                            return Value::Error(String::from("Tried to read from nullptr"));
-                        } else {
-                            let mut result = Value::None;
-                            unsafe {
-                                std::ptr::copy_nonoverlapping(
-                                    *ptr as *const Value,
-                                    &mut result as *mut Value,
-                                    1,
-                                );
-                            }
-                            return result;
+                        let mut result = Value::None;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                ptr.as_ptr(),
+                                &mut result as *mut Value,
+                                1,
+                            );
                         }
+                        return result;
                     }
                     _ => return Value::Error(String::from("Cannot read from a non-ptr type")),
                 }
@@ -607,17 +577,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             if args.len() != 1 {
                 Value::Error(String::from("asptr requires exactly one argument"))
             } else {
-                return Value::PtrWrapper(&args[0] as *const Value as *mut Value);
-            }
-        })),
-    ));
-    natives.push((
-        String::from("get_nullptr"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 0 {
-                Value::Error(String::from("get_nullptr requires exactly zero arguments"))
-            } else {
-                return Value::PtrWrapper(std::ptr::null_mut() as *mut Value);
+                return Value::PtrWrapper(NonNull::new(&args[0] as *const Value as *mut Value).unwrap());
             }
         })),
     ));
@@ -953,16 +913,12 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
                 if let Value::Int(index) = &args[1] {
                     if *index < 1 {
                         return Value::Error(String::from("Index must be greater than 0"));
                     }
 
-                    let list_ptr = *ptr as *mut Value;
+                    let list_ptr = ptr.as_ptr() as *mut Value;
                     let list = unsafe { &mut *list_ptr };
 
                     if let Value::List(elements) = list {
@@ -989,11 +945,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
-                let list_ptr = *ptr as *mut Value;
+                let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
@@ -1020,11 +972,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
-                let list_ptr = *ptr as *mut Value;
+                let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
@@ -1050,11 +998,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
-                let list_ptr = *ptr as *mut Value;
+                let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
@@ -1087,11 +1031,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
-                let list_ptr = *ptr as *mut Value;
+                let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
@@ -1117,11 +1057,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
-                let list_ptr = *ptr as *mut Value;
+                let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
@@ -1152,16 +1088,12 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
-                let list_ptr = *ptr as *mut Value;
+                let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
                     if let Some(first) = elements.first() {
-                        return Value::PtrWrapper(first as *const Value as *mut Value);
+                        return Value::PtrWrapper(NonNull::new(first as *const Value as *mut Value).unwrap());
                     } else {
                         return Value::None;
                     }
@@ -1186,16 +1118,12 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
-                let list_ptr = *ptr as *mut Value;
+                let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
                     if let Some(last) = elements.last() {
-                        return Value::PtrWrapper(last as *const Value as *mut Value);
+                        return Value::PtrWrapper(NonNull::new(last as *const Value as *mut Value).unwrap());
                     } else {
                         return Value::None;
                     }
@@ -1220,11 +1148,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
-                let list_ptr = *ptr as *mut Value;
+                let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
@@ -1260,20 +1184,12 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
-                let list_ptr = *ptr as *mut Value;
+                let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
                     if let Value::PtrWrapper(ptr2) = &args[1] {
-                        if ptr2.is_null() {
-                            return Value::Error(String::from("Cannot read from a null pointer"));
-                        }
-
-                        let list_ptr2 = *ptr2 as *mut Value;
+                        let list_ptr2 = ptr2.as_ptr() as *mut Value;
                         let list2 = unsafe { &mut *list_ptr2 };
 
                         if let Value::List(elements2) = list2 {
@@ -1319,11 +1235,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
-                let list_ptr = *ptr as *mut Value;
+                let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
@@ -1439,16 +1351,12 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
-                if ptr.is_null() {
-                    return Value::Error(String::from("Cannot read from a null pointer"));
-                }
-
                 if let Value::Int(index) = &args[1] {
                     if *index < 1 {
                         return Value::Error(String::from("Index must be greater than 0"));
                     }
 
-                    let list_ptr = *ptr as *mut Value;
+                    let list_ptr = ptr.as_ptr() as *mut Value;
                     let list = unsafe { &mut *list_ptr };
 
                     if let Value::Tuple(elements) = list {

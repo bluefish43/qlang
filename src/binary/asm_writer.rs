@@ -367,6 +367,20 @@ pub fn write_instruction<W: Write>(w: &mut W, instruction: Instruction) -> std::
         Instruction::AllocArgsToLocal => {
             w.write_all(&[113])?;
         }
+        Instruction::DefineCoroutine(name) => {
+            w.write_all(&[114])?;
+            write_string(w, name)?;
+        }
+        Instruction::RunCoroutine(name) => {
+            w.write_all(&[115])?;
+            write_string(w, name)?;
+        }
+        Instruction::EndCoroutine => {
+            w.write_all(&[116])?;
+        }
+        Instruction::AwaitCoroutineFutureStack => {
+            w.write_all(&[117])?;
+        }
     }
     Ok(())
 }
@@ -428,7 +442,7 @@ pub fn write_value<W: Write>(w: &mut W, v: Value) -> std::io::Result<()> {
             w.write_all(&[12])?;
             write_string(w, e)?;
         }
-        Value::PtrWrapper(_) | Value::Function(_) | Value::FileHandle(_) => {
+        Value::PtrWrapper(_) | Value::Function(_) | Value::FileHandle(_) | Value::Future(..) => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "Pointers (function pointers or file handles) are not a static type (they cannot be written into binary).",
@@ -444,6 +458,10 @@ pub fn write_value<W: Write>(w: &mut W, v: Value) -> std::io::Result<()> {
             for bi in b {
                 w.write_all(&bi.to_le_bytes())?;
             }
+        }
+        Value::Mutex(v) => {
+            w.write_all(&[15])?;
+            write_value(w, v.lock().clone())?;
         }
     }
     Ok(())
@@ -543,6 +561,7 @@ pub fn write_type<W: Write>(w: &mut W, v: Types) -> std::io::Result<()> {
         Types::Byte => w.write_all(&[16])?,
         Types::Bytes => w.write_all(&[17])?,
         Types::FileHandle => w.write_all(&[18])?,
+        Types::Mutex => w.write_all(&[19])?,
     }
     Ok(())
 }

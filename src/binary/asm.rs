@@ -173,6 +173,11 @@ pub fn read_instruction<R: Read>(r: &mut R) -> std::io::Result<Instruction> {
         110 => Ok(Instruction::EndClass),
         111 => Ok(Instruction::PushCurrentObject),
         112 => Ok(Instruction::MakeCurrentObjectNone),
+        113 => Ok(Instruction::AllocArgsToLocal),
+        114 => Ok(Instruction::DefineCoroutine(read_string(r)?)),
+        115 => Ok(Instruction::RunCoroutine(read_string(r)?)),
+        116 => Ok(Instruction::EndCoroutine),
+        117 => Ok(Instruction::AwaitCoroutineFutureStack),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Invalid instruction tag: {:?}", tag[0]),

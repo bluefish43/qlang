@@ -34,6 +34,7 @@ impl<'a, W: Write> IOControllerW<'a, W> {
 
 impl<'a, W: std::io::Write> Write for IOControllerW<'a, W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.write_pending()?;
         if !self.is_locked {
             self.writer.write(buf)
         } else {

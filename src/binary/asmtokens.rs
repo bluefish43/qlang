@@ -51,7 +51,12 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
 
                             "asrf", "hrsm", "rdil", "tpof", "iinsof", "gfnptr", "ivptr", "pfacptr",
                             "cst", "grfh", "gwfh", "cfh", "pfhp", "rffh", "rfhts", "rfhtb", "wstfh",
-                            "wbtfh"
+                            "wbtfh",
+                            "svr", "rsvr", "grfhs", "gwfhs", "cfhs", "rffhs", "pfhps", "dfclass", "pubfld", "dfield",
+                            "epubfl", "prfl", "eprfl", "lftpb", "lftpr", "settpb", "settpr", "stspb", "stspr",
+                            "clsmdef", "pubmet", "epubmet", "privmet", "eprivmet", "stmt", "estmt", "inh",
+                            "constructor", "instan", "ivkstmt", "ivkpubmt", "ivkprivmt", "setcobj", "eclass", "pushcobj", "mkcobjnone",
+                            "allcargslcl", "defcor", "endcor", "runcor", "awaitcor",
                         ]
                         .contains(&identifier.as_str())
                         {
@@ -367,6 +372,17 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                     '\n' => {
                         column = 1;
                         line += 1;
+                    }
+                    ';' => {
+                        line += 1;
+                        column = 1;
+                        while let Some(c) = iterator.next() {
+                            if c == '\n' {
+                                break;
+                            } else {
+                                continue;
+                            }
+                        }
                     }
                     _ => {
                         if character.is_whitespace() {
