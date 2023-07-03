@@ -21,7 +21,6 @@ use std::{
 use parking_lot::Mutex;
 use async_recursion::async_recursion;
 use async_std::task;
-use num_traits::identities::Zero;
 
 pub struct VMErrorInfo {
     pub message: String,

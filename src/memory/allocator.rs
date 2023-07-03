@@ -15,6 +15,7 @@ pub struct GarbageCollector {
     marked: HashSet<NonNull<VMValue>>, // Using VMValue instead of crate::vm::Value
     scopes: Vec<HashSet<NonNull<VMValue>>>, // Using VMValue instead of crate::vm::Value
     roots: HashSet<NonNull<VMValue>>,
+    already_freed: HashSet<*mut u8>,
 }
 
 impl GarbageCollector {
@@ -24,6 +25,7 @@ impl GarbageCollector {
             marked: HashSet::new(),
             scopes: Vec::new(),
             roots: HashSet::new(),
+            already_freed: HashSet::new(),
         }
     }
 
@@ -193,11 +195,14 @@ impl GarbageCollector {
     fn dealloc(&mut self) {
         for block in &mut self.blocks {
             for &object_ptr in &block.objects {
-                unsafe {
-                    eprintln!("Deallocating block {:?}", object_ptr);
-                    let actual_value = std::ptr::read_volatile(object_ptr.as_ptr());
-                    eprintln!("Actual value: {:#?}", actual_value);
-                    let _ = Box::from_raw(object_ptr.as_ptr());
+                if self.already_freed.contains(&(object_ptr.as_ptr() as *mut u8)) {
+                    continue;
+                } else {
+                    unsafe {
+                        eprintln!("Deallocating block (supposedly unnalocated variable) {:?}", object_ptr);
+                        self.already_freed.insert(object_ptr.as_ptr() as *mut u8);
+                        let _ = Box::from_raw(object_ptr.as_ptr());
+                    }
                 }
             }
         }
@@ -215,12 +220,6 @@ impl GarbageCollector {
 
         // Move the roots from the other GarbageCollector
         self.roots.extend(other.roots.drain());
-    }
-}
-
-impl Drop for GarbageCollector {
-    fn drop(&mut self) {
-        self.dealloc();
     }
 }
 
