@@ -3,25 +3,15 @@ use std::io::stdin;
 use std::io::{Read, Write};
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::time::Duration;
 
-use ansi_term::Color;
-
-use chrono::prelude::*;
-
-use crate::{
-    vm::{value_to_readable, value_to_string, Instruction, Types, Value},
-    get_current_time
-};
+use crate::vm::{value_to_readable, value_to_string, Instruction, Types, Value};
 
 #[derive(Clone)]
 pub enum Function {
     Native(Arc<dyn Fn(&[Value]) -> Value>),
-    Closure(FunctionStructNoName),
     Interpreted(FunctionStruct),
 }
 
-#[allow(unused)]
 macro_rules! my_format {
     ($format_string:expr) => {
         format!($format_string)
@@ -95,7 +85,14 @@ macro_rules! my_format {
                 _ => {
                     formatted_string = formatted_string.replace(&format!("{{.{}{}}}", $option, $param), value_str);
                 },
+            }#[derive(PartialEq, Debug, Clone)]
+            pub struct FunctionStruct {
+                pub name: String,
+                pub args: Vec<(String, Types)>,
+                pub returns: Types,
+                pub body: Vec<Instruction>,
             }
+            
         )*
         formatted_string
     }};
@@ -106,10 +103,9 @@ impl PartialEq for Function {
         match self {
             Function::Native(_) => false,
             Function::Interpreted(s) => match other {
+                Function::Native(_) => false,
                 Function::Interpreted(s2) => s == s2,
-                _ => false,
             },
-            Function::Closure(_) => false,
         }
     }
 }
@@ -119,16 +115,8 @@ impl Debug for Function {
         match self {
             Function::Native(_) => write!(f, "<builtin_function>"),
             Function::Interpreted(s) => write!(f, "Interpreted({:?})", s),
-            Function::Closure(c) => write!(f, "closure {:?}", c),
         }
     }
-}
-
-#[derive(PartialEq, Debug, Clone)]
-pub struct FunctionStructNoName {
-    pub args: Vec<(String, Types)>,
-    pub returns: Types,
-    pub body: Vec<Instruction>,
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -536,7 +524,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
         String::from("writeptr"),
         Function::Native(Arc::new(|args| {
             if args.len() < 2 {
-                return Value::Error(String::from("writeptr requires exactly two arguments"));
+                return Value::Error(String::from("writeptr requires exactly two arguments"))
             } else {
                 match &args[0] {
                     Value::PtrWrapper(ptr) => {
@@ -557,14 +545,14 @@ pub fn get_natives() -> Vec<(String, Function)> {
                 match &args[0] {
                     Value::PtrWrapper(ptr) => {
                         let mut result = Value::None;
-                        unsafe {
+                            unsafe {
                             std::ptr::copy_nonoverlapping(
-                                ptr.as_ptr(),
+                                ptr.as_ptr() as *const Value,
                                 &mut result as *mut Value,
                                 1,
                             );
                         }
-                        return result;
+                        result
                     }
                     _ => return Value::Error(String::from("Cannot read from a non-ptr type")),
                 }
@@ -913,6 +901,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 if let Value::Int(index) = &args[1] {
                     if *index < 1 {
                         return Value::Error(String::from("Index must be greater than 0"));
@@ -945,6 +934,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
@@ -972,6 +962,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
@@ -998,6 +989,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
@@ -1031,6 +1023,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
@@ -1057,6 +1050,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
@@ -1088,6 +1082,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
@@ -1148,6 +1143,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
@@ -1184,11 +1180,13 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
                 if let Value::List(elements) = list {
                     if let Value::PtrWrapper(ptr2) = &args[1] {
+
                         let list_ptr2 = ptr2.as_ptr() as *mut Value;
                         let list2 = unsafe { &mut *list_ptr2 };
 
@@ -1235,6 +1233,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 let list_ptr = ptr.as_ptr() as *mut Value;
                 let list = unsafe { &mut *list_ptr };
 
@@ -1351,6 +1350,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
+
                 if let Value::Int(index) = &args[1] {
                     if *index < 1 {
                         return Value::Error(String::from("Index must be greater than 0"));
@@ -1934,105 +1934,5 @@ pub fn get_math() -> Vec<(String, Function)> {
         })),
     ));
 
-    natives.push((
-        String::from("sleep"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 1 {
-                return Value::Error(String::from("sleep requires exactly one argument"));
-            }
-
-            match &args[0] {
-                Value::Int(n) => {
-                    if n <= &0 {
-                        return Value::Error(String::from("sleep requires a value bigger than zero"));
-                    }
-                    std::thread::sleep(Duration::from_secs(*n as u64));
-                    return Value::None;
-                }
-                Value::BigInt(n) => {
-                    if n <= &0 {
-                        return Value::Error(String::from("sleep requires a value bigger than zero"));
-                    }
-                    std::thread::sleep(Duration::from_secs(*n as u64));
-                    return Value::None;
-                }
-                _ => Value::Error(String::from("sleep requires a numeric argument")),
-            }
-        }))
-    ));
-
-    natives.push((
-        String::from("panic"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 0 {
-                let mut result = String::new();
-                for val in args {
-                    result.push_str(&value_to_string(val));
-                }
-                eprintln!("{}: program PANICKED at `{}` with message: {}", Color::Red.bold().paint("RuntimePanic"), get_current_time(), result);
-                std::process::exit(1);
-            } else {
-                eprintln!("{}: program PANICKED at `{}` without a message", Color::Red.bold().paint("RuntimePanic"), get_current_time());
-                std::process::exit(1);
-            }
-        }))
-    ));
-
-    natives.push((
-        String::from("get_time"),
-        Function::Native(Arc::new(|_| {
-            let local: DateTime<Local> = Local::now();
-            Value::String(local.format("%H:%M:%S").to_string())
-        }))
-    ));
-
-    natives.push((
-        String::from("getchar"),
-        Function::Native(Arc::new(|_| {
-            let mut buffer = [0; 1];
-            let lock = stdin().read(&mut buffer);
-            if let Err(err) = lock {
-                return Value::Error(format!("Failed to read from stdin: {}", err));
-            }
-            return Value::Character(buffer[0] as char);
-        }))
-    ));
-
     natives
-}
-
-pub fn get_half_natives() -> Vec<(String, Function)> {
-    let mut natives: Vec<(String, Function)> = Vec::new();
-    
-    natives.push(("open_file".to_string(), Function::Interpreted(FunctionStruct {
-        name: "open_file".to_string(),
-        args: vec![("file_name".to_string(), Types::String)],
-        returns: Types::FileHandle,
-        body: [
-            Instruction::SequestrateVariables,
-            Instruction::Push(Value::String("open_file".to_string())),
-            Instruction::PopToRoot(String::from("__function__")),
-            Instruction::AllocArgsToLocal,
-            Instruction::Load("file_name".to_string()),
-            Instruction::GetReadFileHandleStack,
-            Instruction::Return,
-        ].to_vec(),
-    })));
-
-    natives.push(("create_file".to_string(), Function::Interpreted(FunctionStruct {
-        name: "create_file".to_string(),
-        args: vec![("file_name".to_string(), Types::String)],
-        returns: Types::FileHandle,
-        body: [
-            Instruction::SequestrateVariables,
-            Instruction::Push(Value::String("create_file".to_string())),
-            Instruction::PopToRoot(String::from("__function__")),
-            Instruction::AllocArgsToLocal,
-            Instruction::Load("file_name".to_string()),
-            Instruction::GetWriteFileHandleStack,
-            Instruction::Return,
-        ].to_vec(),
-    })));
-
-    return natives;
 }

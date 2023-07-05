@@ -1,0 +1,4 @@
+push string "Hello, world!\n"
+putln
+throw "This is a test"
+hlt

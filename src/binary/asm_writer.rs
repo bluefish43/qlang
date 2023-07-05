@@ -182,204 +182,8 @@ pub fn write_instruction<W: Write>(w: &mut W, instruction: Instruction) -> std::
             w.write_all(&[62])?;
             write_string(w, t)?;
         }
-        Instruction::GetFunctionPtr(f) => {
-            w.write_all(&[63])?;
-            write_string(w, f)?;
-        }
-        Instruction::InvokeViaPtr => {
-            w.write_all(&[64])?;
-        }
-        Instruction::PushFunctionAsClosurePtr(args, ret) => {
-            w.write_all(&[65])?;
-            write_parameter_list(w, args)?;
-            write_type(w, ret)?;
-        }
-        Instruction::PopToRoot(name) => {
-            w.write_all(&[66])?;
-            write_string(w, name)?;
-        }
-        Instruction::Cast(t) => {
-            w.write_all(&[67])?;
-            write_type(w, t)?;
-        }
-        Instruction::GetReadFileHandle(f) => {
-            w.write_all(&[68])?;
-            write_string(w, f)?;
-        }
-        Instruction::GetWriteFileHandle(f) => {
-            w.write_all(&[69])?;
-            write_string(w, f)?;
-        }
-        Instruction::CloseFileHandle(f) => {
-            w.write_all(&[70])?;
-            write_string(w, f)?;
-        }
-        Instruction::PushFileHandlePointer(f) => {
-            w.write_all(&[71])?;
-            write_string(w, f)?;
-        }
-        Instruction::ReadFromFileHandle(s) => {
-            w.write_all(&[72])?;
-            w.write_all(&s.to_le_bytes())?;
-        }
-        Instruction::ReadFileHandleToString => {
-            w.write_all(&[73])?;
-        }
-        Instruction::ReadFileHandleToBytes => {
-            w.write_all(&[74])?;
-        }
-        Instruction::WriteStringToFileHandle => {
-            w.write_all(&[75])?;
-        }
-        Instruction::WriteBytesToFileHandle => {
-            w.write_all(&[76])?;
-        }
-        Instruction::SequestrateVariables => {
-            w.write_all(&[77])?;
-        }
-        Instruction::RestoreSequestratedVariables =>{
-            w.write_all(&[78])?;
-        }
-        Instruction::GetReadFileHandleStack => {
-            w.write_all(&[79])?;
-        }
-        Instruction::GetWriteFileHandleStack => {
-            w.write_all(&[80])?;
-        }
-        Instruction::CloseFileHandleStack => {
-            w.write_all(&[81])?;
-        }
-        Instruction::ReadFromFileHandleStack => {
-            w.write_all(&[82])?;
-        }
-        Instruction::PushFileHandlePointerStack => {
-            w.write_all(&[83])?;
-        }
-        Instruction::DefineClass(c) => {
-            w.write_all(&[84])?;
-            write_string(w, c)?;
-        }
-        Instruction::PublicFields => {
-            w.write_all(&[85])?;
-        }
-        Instruction::DefineField(name, type_) => {
-            w.write_all(&[86])?;
-            write_string(w, name)?;
-            write_type(w, type_)?;
-        }
-        Instruction::EndPublicFields => {
-            w.write_all(&[87])?;
-        }
-        Instruction::PrivateFields => {
-            w.write_all(&[88])?;
-        }
-        Instruction::EndPrivateFields => {
-            w.write_all(&[89])?;
-        }
-        Instruction::LoadFromThisPublic(name) => {
-            w.write_all(&[90])?;
-            write_string(w, name)?;
-        }
-        Instruction::LoadFromThisPrivate(name) => {
-            w.write_all(&[91])?;
-            write_string(w, name)?;
-        }
-        Instruction::SetThisPublic(name, value) => {
-            w.write_all(&[92])?;
-            write_string(w, name)?;
-            write_value(w, value)?;
-        }
-        Instruction::SetThisPrivate(name, value) => {
-            w.write_all(&[93])?;
-            write_string(w, name)?;
-            write_value(w, value)?;
-        }
-        Instruction::SetThisStackPublic(name) => {
-            w.write_all(&[94])?;
-            write_string(w, name)?;
-        }
-        Instruction::SetThisStackPrivate(name) => {
-            w.write_all(&[95])?;
-            write_string(w, name)?;
-        }
-        Instruction::ClassMethodDefinition(name, args, returns) => {
-            w.write_all(&[96])?;
-            write_string(w, name)?;
-            write_parameter_list(w, args)?;
-            write_type(w, returns)?;
-        }
-        Instruction::PublicMethods => {
-            w.write_all(&[97])?;
-        }
-        Instruction::EndPublicMethods => {
-            w.write_all(&[98])?;
-        }
-        Instruction::PrivateMethods => {
-            w.write_all(&[99])?;
-        }
-        Instruction::EndPrivateMethods => {
-            w.write_all(&[100])?;
-        }
-        Instruction::StaticMethods => {
-            w.write_all(&[101])?;
-        }
-        Instruction::EndStaticMethods => {
-            w.write_all(&[102])?;
-        }
-        Instruction::InheritFrom(name) => {
-            w.write_all(&[103])?;
-            write_string(w, name)?;
-        }
-        Instruction::ConstructorFunctionDefinition(args, returns) => {
-            w.write_all(&[104])?;
-            write_parameter_list(w, args)?;
-            write_type(w, returns)?;
-        }
-        Instruction::Instantiate(n) => {
-            w.write_all(&[105])?;
-            write_string(w, n)?;
-        }
-        Instruction::InvokeStaticMethod(n) => {
-            w.write_all(&[106])?;
-            write_string(w, n)?;
-        }
-        Instruction::InvokePublicMethod(n) => {
-            w.write_all(&[107])?;
-            write_string(w, n)?;
-        }
-        Instruction::InvokePrivateMethod(n) => {
-            w.write_all(&[108])?;
-            write_string(w, n)?;
-        }
-        Instruction::SetCurrentObject(n) => {
-            w.write_all(&[109])?;
-            write_string(w, n)?;
-        }
-        Instruction::EndClass => {
-            w.write_all(&[110])?;
-        }
-        Instruction::PushCurrentObject => {
-            w.write_all(&[111])?;
-        }
-        Instruction::MakeCurrentObjectNone => {
-            w.write_all(&[112])?;
-        }
-        Instruction::AllocArgsToLocal => {
-            w.write_all(&[113])?;
-        }
-        Instruction::DefineCoroutine(name) => {
-            w.write_all(&[114])?;
-            write_string(w, name)?;
-        }
-        Instruction::RunCoroutine(name) => {
-            w.write_all(&[115])?;
-            write_string(w, name)?;
-        }
-        Instruction::EndCoroutine => {
-            w.write_all(&[116])?;
-        }
-        Instruction::AwaitCoroutineFutureStack => {
-            w.write_all(&[117])?;
+        _ => {
+            unimplemented!()
         }
     }
     Ok(())
@@ -395,11 +199,10 @@ pub fn write_string<W: Write>(w: &mut W, s: String) -> std::io::Result<()> {
 pub fn write_value<W: Write>(w: &mut W, v: Value) -> std::io::Result<()> {
     match v {
         Value::None => w.write_all(&[0])?,
-        Value::Class(_) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Classes cannot be written to binary"
-            ))
+        Value::Class(c) => {
+            write_string(w, c.name)?;
+            write_static_methods(w, c.staticmethods)?;
+            write_properties(w, c.properties)?;
         }
         Value::Int(i) => {
             w.write_all(&[2])?;
@@ -442,26 +245,19 @@ pub fn write_value<W: Write>(w: &mut W, v: Value) -> std::io::Result<()> {
             w.write_all(&[12])?;
             write_string(w, e)?;
         }
-        Value::PtrWrapper(_) | Value::Function(_) | Value::FileHandle(_) | Value::Future(..) => {
+        Value::PtrWrapper(_) | Value::FileHandle(_) | Value::Future(_)  => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "Pointers (function pointers or file handles) are not a static type (they cannot be written into binary).",
+                "Pointers, Files and Futures are not a static type (they cannot be written into binary).",
             ))
         }
-        Value::Byte(b) => {
-            w.write_all(&[13])?;
-            w.write_all(&b.to_le_bytes())?;
-        }
         Value::Bytes(b) => {
-            w.write_all(&[14])?;
-            w.write_all(&b.len().to_le_bytes())?;
-            for bi in b {
-                w.write_all(&bi.to_le_bytes())?;
+            w.write_all(&[13])?;
+            let len = b.len() as u32;
+            w.write_all(&len.to_le_bytes())?;
+            for v in b {
+                w.write_all(&v.to_le_bytes())?;
             }
-        }
-        Value::Mutex(v) => {
-            w.write_all(&[15])?;
-            write_value(w, v.lock().clone())?;
         }
     }
     Ok(())
@@ -547,7 +343,7 @@ pub fn write_type<W: Write>(w: &mut W, v: Types) -> std::io::Result<()> {
             w.write_all(&[9])?;
         }
         Types::Tuple => {
-            w.write_all(&[9])?;
+            w.write_all(&[10])?;
         }
         Types::Uninitialized => w.write_all(&[11])?,
         Types::Error => {
@@ -556,34 +352,22 @@ pub fn write_type<W: Write>(w: &mut W, v: Types) -> std::io::Result<()> {
         Types::PtrWrapper => {
             w.write_all(&[13])?;
         }
-        Types::Any => w.write_all(&[14])?,
-        Types::Function => w.write_all(&[15])?,
-        Types::Byte => w.write_all(&[16])?,
-        Types::Bytes => w.write_all(&[17])?,
-        Types::FileHandle => w.write_all(&[18])?,
-        Types::Mutex => w.write_all(&[19])?,
+        Types::FileHandle => w.write_all(&[14])?,
+        Types::Bytes => w.write_all(&[15])?,
+        Types::Future => w.write_all(&[16])?,
+        Types::Any => w.write_all(&[17])?,
     }
     Ok(())
 }
 
 pub fn write_function<W: Write>(w: &mut W, function: Function) -> std::io::Result<()> {
-    match function {
-        Function::Interpreted(func) => {
-            w.write_all(&[1])?;
-            write_string(w, func.name)?;
-            write_parameter_list(w, func.args)?;
-            write_type(w, func.returns)?;
-            Ok(())
-        }
-        Function::Closure(c) => {
-            w.write_all(&[2])?;
-            write_parameter_list(w, c.args)?;
-            write_type(w, c.returns)?;
-            Ok(())
-        }
-        _ => return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Cannot write internal function to binary"
-        ))
+    if let Function::Interpreted(func) = function {
+        w.write_all(&[1])?;
+        write_string(w, func.name)?;
+        write_parameter_list(w, func.args)?;
+        write_type(w, func.returns)?;
+        Ok(())
+    } else {
+        panic!()
     }
 }

@@ -1,10 +1,9 @@
-use crate::function::FunctionStructNoName;
-use crate::{
-    function::Function, function::FunctionStruct, vm::Types, Instruction, Value,
-};
-use fxhash::FxHashMap;
 use std::io::Read;
 use std::mem::size_of;
+use crate::{
+    class::Class, function::Function, function::FunctionStruct, vm::Types, Instruction, Value,
+};
+use fxhash::FxHashMap;
 
 pub fn read_instructions<R: Read>(r: &mut R) -> std::io::Result<Vec<Instruction>> {
     let mut instructions: Vec<Instruction> = Vec::new();
@@ -108,10 +107,7 @@ pub fn read_instruction<R: Read>(r: &mut R) -> std::io::Result<Instruction> {
         51 => Ok(Instruction::DereferenceRaw),
         52 => Ok(Instruction::DebuggingPrintStack),
         53 => Ok(Instruction::MemoryReadVolatile(read_value(r)?)),
-        54 => Ok(Instruction::MemoryWriteVolatile(
-            read_value(r)?,
-            read_value(r)?,
-        )),
+        54 => Ok(Instruction::MemoryWriteVolatile(read_value(r)?, read_value(r)?)),
         55 => Ok(Instruction::Collect),
         56 => Ok(Instruction::EnterScope),
         57 => Ok(Instruction::LeaveScope),
@@ -120,64 +116,6 @@ pub fn read_instruction<R: Read>(r: &mut R) -> std::io::Result<Instruction> {
         60 => Ok(Instruction::RefDifferenceInLoc),
         61 => Ok(Instruction::Typeof),
         62 => Ok(Instruction::IsInstanceof(read_string(r)?)),
-        63 => Ok(Instruction::GetFunctionPtr(read_string(r)?)),
-        64 => Ok(Instruction::InvokeViaPtr),
-        65 => Ok(Instruction::PushFunctionAsClosurePtr(
-            read_parameter_list(r)?,
-            read_type(r)?,
-        )),
-        66 => Ok(Instruction::PopToRoot(read_string(r)?)),
-        67 => Ok(Instruction::Cast(read_type(r)?)),
-        68 => Ok(Instruction::GetReadFileHandle(read_string(r)?)),
-        69 => Ok(Instruction::GetWriteFileHandle(read_string(r)?)),
-        70 => Ok(Instruction::CloseFileHandle(read_string(r)?)),
-        71  => Ok(Instruction::PushFileHandlePointer(read_string(r)?)),
-        72 => Ok(Instruction::ReadFromFileHandle(read_usize(r)?)),
-        73 => Ok(Instruction::ReadFileHandleToString),
-        74 => Ok(Instruction::ReadFileHandleToBytes),
-        75 => Ok(Instruction::WriteStringToFileHandle),
-        76 => Ok(Instruction::WriteBytesToFileHandle),
-        77 => Ok(Instruction::SequestrateVariables),
-        78 => Ok(Instruction::RestoreSequestratedVariables),
-        79 => Ok(Instruction::GetReadFileHandleStack),
-        80 => Ok(Instruction::GetWriteFileHandleStack),
-        81 => Ok(Instruction::CloseFileHandleStack),
-        82 => Ok(Instruction::ReadFromFileHandleStack),
-        83 => Ok(Instruction::PushFileHandlePointerStack),
-        84 => Ok(Instruction::DefineClass(read_string(r)?)),
-        85 => Ok(Instruction::PublicFields),
-        86 => Ok(Instruction::DefineField(read_string(r)?, read_type(r)?)),
-        87 => Ok(Instruction::EndPublicFields),
-        88 => Ok(Instruction::PrivateFields),
-        89 => Ok(Instruction::EndPrivateFields),
-        90 => Ok(Instruction::LoadFromThisPublic(read_string(r)?)),
-        91 => Ok(Instruction::LoadFromThisPrivate(read_string(r)?)),
-        92 => Ok(Instruction::SetThisPublic(read_string(r)?, read_value(r)?)),
-        93 => Ok(Instruction::SetThisPublic(read_string(r)?, read_value(r)?)),
-        94 => Ok(Instruction::SetThisStackPublic(read_string(r)?)),
-        95 => Ok(Instruction::SetThisStackPrivate(read_string(r)?)),
-        96 => Ok(Instruction::ClassMethodDefinition(read_string(r)?, read_parameter_list(r)?, read_type(r)?)),
-        97 => Ok(Instruction::PublicMethods),
-        98 => Ok(Instruction::EndPublicMethods),
-        99 => Ok(Instruction::PrivateMethods),
-        100 => Ok(Instruction::EndPrivateMethods),
-        101 => Ok(Instruction::StaticMethods),
-        102 => Ok(Instruction::EndStaticMethods),
-        103 => Ok(Instruction::InheritFrom(read_string(r)?)),
-        104 => Ok(Instruction::ConstructorFunctionDefinition(read_parameter_list(r)?, read_type(r)?)),
-        105 => Ok(Instruction::Instantiate(read_string(r)?)),
-        106 => Ok(Instruction::InvokeStaticMethod(read_string(r)?)),
-        107 => Ok(Instruction::InvokePublicMethod(read_string(r)?)),
-        108 => Ok(Instruction::InvokePrivateMethod(read_string(r)?)),
-        109 => Ok(Instruction::SetCurrentObject(read_string(r)?)),
-        110 => Ok(Instruction::EndClass),
-        111 => Ok(Instruction::PushCurrentObject),
-        112 => Ok(Instruction::MakeCurrentObjectNone),
-        113 => Ok(Instruction::AllocArgsToLocal),
-        114 => Ok(Instruction::DefineCoroutine(read_string(r)?)),
-        115 => Ok(Instruction::RunCoroutine(read_string(r)?)),
-        116 => Ok(Instruction::EndCoroutine),
-        117 => Ok(Instruction::AwaitCoroutineFutureStack),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Invalid instruction tag: {:?}", tag[0]),
@@ -228,10 +166,22 @@ pub fn read_value<R: Read>(r: &mut R) -> std::io::Result<Value> {
     match tag {
         [0] => return Ok(Value::None),
         [1] => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Classes cannot be written to binary"
-            ))
+            let mut buffer = [0; size_of::<u32>()];
+            r.read_exact(&mut buffer)?;
+            let len = u32::from_le_bytes(buffer) as usize;
+            let mut class_name_buf = vec![0u8; len];
+            r.read_exact(&mut class_name_buf)?;
+            let class_name = String::from_utf8(class_name_buf)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+            let static_methods = read_static_methods(r)?;
+            let properties = read_properties(r)?;
+
+            Ok(Value::Class(Class {
+                name: class_name,
+                staticmethods: static_methods,
+                properties: properties,
+            }))
         }
         [2] => {
             let mut buffer = [0; size_of::<i32>()];
@@ -280,22 +230,6 @@ pub fn read_value<R: Read>(r: &mut R) -> std::io::Result<Value> {
             let string = read_string(r)?;
             return Ok(Value::Error(string));
         }
-        [13] => {
-            let mut buffer = [0; size_of::<u8>()];
-            r.read_exact(&mut buffer)?;
-            return Ok(Value::Byte(u8::from_le_bytes(buffer)));
-        }
-        [14] => {
-            let mut buffer = [0; size_of::<usize>()];
-            r.read_exact(&mut buffer)?;
-            let mut bytes = Vec::new();
-            for _ in 1..usize::from_le_bytes(buffer) {
-                let mut byte_buf = [0; size_of::<u8>()];
-                r.read_exact(&mut byte_buf)?;
-                bytes.push(u8::from_le_bytes(byte_buf));
-            }
-            return Ok(Value::Bytes(bytes))
-        }
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -303,12 +237,6 @@ pub fn read_value<R: Read>(r: &mut R) -> std::io::Result<Value> {
             ))
         }
     }
-}
-
-pub fn read_usize<R: Read>(r: &mut R) -> std::io::Result<usize> {
-    let mut buffer = [0; size_of::<usize>()];
-    r.read_exact(&mut buffer)?;
-    return Ok(usize::from_le_bytes(buffer));
 }
 
 pub fn read_type<R: Read>(r: &mut R) -> std::io::Result<Types> {
@@ -333,15 +261,14 @@ pub fn read_type<R: Read>(r: &mut R) -> std::io::Result<Types> {
         [11] => return Ok(Types::Uninitialized),
         [12] => return Ok(Types::Error),
         [13] => return Ok(Types::PtrWrapper),
-        [14] => return Ok(Types::Any),
-        [15] => return Ok(Types::Function),
-        [16] => return Ok(Types::Byte),
-        [17] => return Ok(Types::Bytes),
-        [18] => return Ok(Types::FileHandle),
+        [17] => return Ok(Types::Any),
+        [14] => return Ok(Types::FileHandle),
+        [15] => return Ok(Types::Bytes),
+        [16] => return Ok(Types::Future),
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Invalid value tag: {:?}", tag),
+                format!("Invalid type tag: {:?}", tag),
             ))
         }
     }
@@ -387,7 +314,7 @@ pub fn read_function<R: Read>(r: &mut R) -> std::io::Result<Function> {
             // Native function (unsupported)
             Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Native functions aren't valid for reading",
+                "Unsupported native function encountered",
             ))
         }
         [1] => {
@@ -398,16 +325,6 @@ pub fn read_function<R: Read>(r: &mut R) -> std::io::Result<Function> {
             let body = read_instructions(r)?;
             Ok(Function::Interpreted(FunctionStruct {
                 name,
-                args,
-                returns,
-                body,
-            }))
-        }
-        [2] => {
-            let args = read_parameter_list(r)?;
-            let returns = read_type(r)?;
-            let body = read_instructions(r)?;
-            Ok(Function::Closure(FunctionStructNoName {
                 args,
                 returns,
                 body,

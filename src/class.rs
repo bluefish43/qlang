@@ -1,16 +1,10 @@
 use fxhash::FxHashMap;
 
-use crate::{function::Function, vm::{Value, Types}};
+use crate::{function::Function, vm::Value};
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub struct Class {
     pub name: String,
-    pub public_methods: FxHashMap<String, Function>,
-    pub private_methods: FxHashMap<String, Function>,
-    pub static_methods: FxHashMap<String, Function>,
-    pub public_properties: FxHashMap<String, (Value, Types)>,
-    pub private_properties: FxHashMap<String, (Value, Types)>,
+    pub staticmethods: FxHashMap<String, Function>,
+    pub properties: FxHashMap<String, Value>,
 }
-
-unsafe impl Send for Class {}
-unsafe impl Sync for Class {}

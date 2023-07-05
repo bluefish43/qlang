@@ -1,21 +1,20 @@
 use crate::{
     class::Class,
     function::{get_natives, Function, FunctionStruct},
-    gcwrapper::GCWrapper, binary::{asm, asmtokens::tokenize, asmparser::Parser}, memory::allocator::GarbageCollector,
+    gcwrapper::GCWrapper, binary::{asm, asmtokens::tokenize, asmparser::Parser},
 };
 use ansi_term::Color;
 use fxhash::FxHashMap;
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
-    io::{stderr, stdin, stdout, Write, Read},
+    io::{stderr, stdin, stdout, Write},
     sync::Arc,
     path::PathBuf,
-    fs::{canonicalize, File},
-    os::raw::{c_int, c_long, c_double, c_float, c_char}, ffi::{CString, CStr}, ptr::NonNull,
+    fs::canonicalize,
+    os::raw::{c_int, c_long, c_double, c_float, c_char}, ffi::{CString, CStr},
 };
 use ansi_term::Colour::{Blue, Green, White, Yellow};
-use async_std::task;
 
 fn colorize_string(input: &str) -> String {
     let mut result = String::new();
@@ -81,6 +80,82 @@ fn underline_filename_line_column<'a>(s: String) -> ANSIGenericString<'a, str> {
     }
 }
 
+pub fn value_to_raw(value: Value) -> RawValue {
+    match value {
+        Value::None => RawValue::None,
+        Value::Int(i) => RawValue::Int(i),
+        Value::BigInt(i) => RawValue::BigInt(i),
+        Value::Float(f) => RawValue::Float(f),
+        Value::LFloat(f) => RawValue::LFloat(f),
+        Value::String(s) => {
+            let c_str = match std::ffi::CString::new(s) {
+                Ok(c_str) => c_str,
+                Err(_) => panic!("Failed to convert string to CString"),
+            };
+            RawValue::String(c_str.into_raw())
+        }
+        Value::Character(c) => RawValue::Character(c as i8),
+        Value::Boolean(b) => RawValue::Boolean(b),
+        Value::Error(e) => {
+            let c_str = match std::ffi::CString::new(e) {
+                Ok(c_str) => c_str,
+                Err(_) => panic!("Failed to convert error string to CString"),
+            };
+            RawValue::Error(c_str.into_raw())
+        }
+        Value::PtrWrapper(p) => {
+            if p.is_null() {
+                return RawValue::RawPtr(std::ptr::null());
+            }
+            return RawValue::RawPtr(&value_to_raw(unsafe { p.as_ref().unwrap().clone() }) as *const RawValue);
+        },
+        _ => panic!("Unsupported Value variant"),
+    }
+}
+
+pub fn raw_to_value(raw_value: RawValue) -> Value {
+    match raw_value {
+        RawValue::None => Value::None,
+        RawValue::Int(i) => Value::Int(i),
+        RawValue::BigInt(i) => Value::BigInt(i),
+        RawValue::Float(f) => Value::Float(f),
+        RawValue::LFloat(f) => Value::LFloat(f),
+        RawValue::String(s) => {
+            let c_str = unsafe { std::ffi::CString::from_raw(s as *mut c_char) };
+            let string_value = match c_str.into_string() {
+                Ok(s) => s,
+                Err(_) => panic!("Failed to convert CString to string"),
+            };
+            Value::String(string_value)
+        }
+        RawValue::Character(c) => Value::Character(c as u8 as char),
+        RawValue::Boolean(b) => Value::Boolean(b),
+        RawValue::Error(e) => {
+            let c_str = unsafe { std::ffi::CString::from_raw(e as *mut c_char) };
+            let error_value = match c_str.into_string() {
+                Ok(s) => s,
+                Err(_) => panic!("Failed to convert CString to error string"),
+            };
+            Value::Error(error_value)
+        }
+        RawValue::RawPtr(p) => Value::RawCValueWrapper(RawValue::RawPtr(p)),
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub enum RawValue {
+    None,
+    Int(c_int),
+    BigInt(c_long),
+    Float(c_double),
+    LFloat(c_float),
+    String(*const c_char),
+    Character(c_char),
+    Boolean(bool),
+    Error(*const c_char),
+    RawPtr(*const RawValue),
+}
+
 #[derive(Clone, PartialEq)]
 pub enum Value {
     None,
@@ -96,14 +171,9 @@ pub enum Value {
     Tuple(Vec<Value>),
     Uninitialized,
     Error(String),
-    PtrWrapper(NonNull<Value>),
-    FileHandle((NonNull<File>, bool)),
-    Bytes(Vec<u8>),
-    Future(usize),
+    PtrWrapper(*mut Value),
+    RawCValueWrapper(RawValue),
 }
-
-unsafe impl Send for Value {}
-unsafe impl Sync for Value {}
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Types {
@@ -121,9 +191,6 @@ pub enum Types {
     Uninitialized,
     Error,
     PtrWrapper,
-    FileHandle,
-    Bytes,
-    Future,
     Any,
 }
 
@@ -143,54 +210,7 @@ pub fn value_to_readable(val: &Value) -> String {
         Value::Error(_) => "Error".to_string(),
         Value::Class(p) => format!("<class Type at {:?}>", p as *const Class),
         Value::PtrWrapper(ptr) => format!("{:#?}", ptr),
-        Value::FileHandle(f) => format!("<file>"),
-        Value::Bytes(b) => format!("{:?}", b),
-        Value::Future(f) => format!("<future>"),
-    }
-}
-
-pub fn value_to_typeof(val: &Value) -> String {
-    match val {
-        Value::None => "None".to_string(),
-        Value::Int(_) => "int".to_string(),
-        Value::BigInt(_) => "bigint".to_string(),
-        Value::Float(_) => "float".to_string(),
-        Value::LFloat(_) => "lfloat".to_string(),
-        Value::String(_) => "string".to_owned(),
-        Value::Character(_) => "char".to_string(),
-        Value::List(_) => format!("{}", "array"),
-        Value::Tuple(_) => format!("{}", "tuple"),
-        Value::Uninitialized => "uninitialized".to_string(),
-        Value::Boolean(_) => "boolean".to_string(),
-        Value::Error(_) => "error".to_string(),
-        Value::Class(_) => format!("class"),
-        Value::PtrWrapper(_) => format!("ptr"),
-        Value::FileHandle(f) => format!("File"),
-        Value::Bytes(b) => format!("Bytes"),
-        Value::Future(_) => format!("Future"),
-    }
-}
-
-pub fn typeof_to_string(val: &Types) -> String {
-    match val {
-        Types::None => "None".to_string(),
-        Types::Int => "int".to_string(),
-        Types::BigInt => "bigint".to_string(),
-        Types::Float => "float".to_string(),
-        Types::LFloat => "lfloat".to_string(),
-        Types::String => "string".to_owned(),
-        Types::Character => "char".to_string(),
-        Types::List => format!("{}", "list"),
-        Types::Tuple => format!("{}", "tuple"),
-        Types::Uninitialized => "uninitialized".to_string(),
-        Types::Boolean => "boolean".to_string(),
-        Types::Error => "error".to_string(),
-        Types::Class => format!("class"),
-        Types::PtrWrapper => format!("ptr"),
-        Types::FileHandle => format!("File"),
-        Types::Bytes => format!("Bytes"),
-        Types::Future => format!("Future"),
-        Types::Any => format!("any"),
+        Value::RawCValueWrapper(p) => format!("<raw_c_value_wrapper Type at {:?}>", p as *const RawValue),
     }
 }
 
@@ -216,41 +236,16 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Error(e) => format!("Error: {}", e),
         Value::Class(p) => format!("<class Type at {:?}>", p as *const Class),
         Value::PtrWrapper(ptr) => {
-            format!("{:#?}", ptr)
+            if ptr.is_null() {
+                "<NULLPTR>".to_string()
+            } else {
+                format!("{:#?}", ptr)
+            }
+        },
+        Value::RawCValueWrapper(ptr) => {
+            let normal = raw_to_value(ptr.clone());
+            value_to_string(&normal)
         }
-        Value::FileHandle(f) => format!("<file Type at {:?}", f.0),
-        Value::Bytes(b) => format!("{:?}", b),
-        Value::Future(_) => format!("Future"),
-    }
-}
-
-pub fn value_to_debug(val: &Value) -> String {
-    match val {
-        Value::None => "None".to_string(),
-        Value::Int(i) => i.to_string(),
-        Value::BigInt(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::LFloat(f) => f.to_string(),
-        Value::String(s) => format!("{:?}", s),
-        Value::Character(c) => format!("{:?}", c),
-        Value::List(l) => {
-            let elements: Vec<String> = l.iter().map(value_to_string).collect();
-            format!("[{}]", elements.join(", "))
-        }
-        Value::Tuple(t) => {
-            let elements: Vec<String> = t.iter().map(value_to_string).collect();
-            format!("({})", elements.join(", "))
-        }
-        Value::Uninitialized => "<Uninitialized>".to_string(),
-        Value::Boolean(b) => b.to_string(),
-        Value::Error(e) => format!("\"Error: {}\"", e),
-        Value::Class(p) => format!("<class Type at {:?}>", p as *const Class),
-        Value::PtrWrapper(ptr) => {
-            format!("{:#?}", ptr)
-        }
-        Value::FileHandle(f) => format!("<file Type at {:?}", f.0),
-        Value::Bytes(b) => format!("{:?}", b),
-        Value::Future(_) => format!("Future"),
     }
 }
 
@@ -321,20 +316,21 @@ impl Debug for Value {
 #[derive(Clone, PartialEq, Debug)]
 pub enum Instruction {
     Declare(String, Value),       // declare variable with name && val
+    DeclareStatic(String, Value), // declare variable with name && val
     GetInput,                     // variable to store value in
     Print,                        // prints top value to the stdout
     Flush,                        // flushes the stdout
     PrintErr,                     // prints to the stderr
     FlushErr,                     // flushes the stderr
     Assign(String, Value),        // assigns value to already existing variable
-    AssignTop(String), // assigns value at the top of the self.stack to already existing variable
+    AssignTop(String), // assigns value at the top of the stack to already existing variable
     ThrowError(String), // throws a new error
-    Push(Value),       // pushes a value to the self.stack
-    Pop(String),       // pops the top value of the self.stack to a variable
-    Load(String),      // loads a variable's value onto the self.stack
+    Push(Value),       // pushes a value to the stack
+    Pop(String),       // pops the top value of the stack to a variable
+    Load(String),      // loads a variable's value onto the stack
     Jump(String),      // jumps to a label
     Label(String),     // defines a label
-    JumpStack(String), // jumps to a label if the top value of the self.stack is true
+    JumpStack(String), // jumps to a label if the top value of the stack is true
     Add,
     Sub,
     Mul,
@@ -356,7 +352,7 @@ pub enum Instruction {
     IncludeStd,     // includes the std library
     Include(String),
     Invoke(String), // invokes a function
-    ToArgsStack,    // pops a value from the self.stack and pushes it onto the args self.stack
+    ToArgsStack,    // pops a value from the stack and pushes it onto the args stack
     Return,
     GetClassProperty(String, String), // from class X gets property Y.
     InvokeClassMethod(String, String), // calls a method from a class.
@@ -366,6 +362,10 @@ pub enum Instruction {
     HaltFromStack,
     StartFunction(String, Vec<(String, Types)>, Types),
     EndFunction,
+    GCMap,
+    GCTake,
+    ForgetVariable(String), // LEAKS THE VARIABLE BY NOT COLLECTING IT
+    Dealloc(String),
     Duplicate,
     LoopStart,
     LoopEnd,
@@ -374,38 +374,6 @@ pub enum Instruction {
     DebuggingPrintStack,
     MemoryReadVolatile(Value),
     MemoryWriteVolatile(Value, Value),
-    EnterScope,
-    LeaveScope,
-    Collect,
-    AsRef,
-    HasRefSameLoc,
-    RefDifferenceInLoc,
-    Typeof,
-    IsInstanceof(String),
-
-    GetReadFileHandle(String),
-    GetWriteFileHandle(String),
-    CloseFileHandle(String),
-    PushFileHandlePointer(String),
-    ReadFromFileHandle(usize),
-    ReadFileHandleToString,
-    ReadFileHandleToBytes,
-    WriteStringToFileHandle,
-    WriteBytesToFileHandle,
-    SequestrateVariables,
-    RestoreSequestratedVariables,
-    GetReadFileHandleStack,
-    GetWriteFileHandleStack,
-    CloseFileHandleStack,
-    ReadFromFileHandleStack,
-    PushFileHandlePointerStack,
-
-    AllocArgsToLocal,
-
-    DefineCoroutine(String),
-    EndCoroutine,
-    RunCoroutine(String),
-    AwaitCoroutineFutureStack,
 }
 
 pub struct VirtualMachine {
@@ -413,8 +381,7 @@ pub struct VirtualMachine {
     labels: FxHashMap<String, u32>,
     instructions: VecDeque<Instruction>,
     pc: i64,
-    pub variables: FxHashMap<String, *const Value>,
-    gc: GarbageCollector,
+    pub variables: GCWrapper<Value>,
     pub functions: FxHashMap<String, (Function, bool)>,
     pub classes: FxHashMap<String, Class>,
     pub included: Vec<PathBuf>,
@@ -423,29 +390,10 @@ pub struct VirtualMachine {
     returns_to: Vec<i64>,
     args_stack: VecDeque<Value>,
     block_len: i64,
-
-    file_handles_names: VecDeque<String>,
-    file_handles: VecDeque<(File, bool)>,
-
-    sequestrated_variables: Vec<FxHashMap<String, *const Value>>,
-
-    last_runned: String,
-    recursive_level: usize,
-    max_recursiveness_level: usize,
-    handles_recursion_count: bool,
-    stack_before: Vec<Value>,
-    expected_return_types: Vec<Types>,
-    args_to_alloc: Vec<FxHashMap<String, Value>>,
-    coroutines: FxHashMap<String, Vec<Instruction>>,
-    running_coroutines: Vec<Option<std::thread::JoinHandle<Result<Value, String>>>>,
 }
 
-unsafe impl Send for VirtualMachine {}
-unsafe impl Sync for VirtualMachine {}
-
 impl VirtualMachine {
-    pub fn new(mut instructions: Vec<Instruction>, filepath: &String, max_recursiveness_level: usize,
-        handles_recursion_count: bool) -> Result<Self, String> {
+    pub fn new(mut instructions: Vec<Instruction>, filepath: &String) -> Result<Self, String> {
         instructions.push(Instruction::HaltFromStack);
         let mut includeds = Vec::new();
         let res = canonicalize(filepath);
@@ -460,60 +408,16 @@ impl VirtualMachine {
                 instructions: instructions.into(),
                 pc: -1,
                 loop_addresses: Vec::new(),
-                variables: FxHashMap::default(),
+                variables: GCWrapper::new(),
                 functions: FxHashMap::default(),
                 classes: FxHashMap::default(),
                 included: includeds,
                 is_catching: false,
                 returns_to: vec![],
                 block_len: 0,
-                gc: GarbageCollector::new(),
-                file_handles: VecDeque::new(),
-                file_handles_names: VecDeque::new(),
-                sequestrated_variables: Vec::new(),
-                last_runned: String::new(),
-                max_recursiveness_level,
-                handles_recursion_count,
-                stack_before: Vec::new(),
-                expected_return_types: Vec::new(),
-                args_to_alloc: Vec::new(),
-                recursive_level: 0,
-                running_coroutines: Vec::new(),
-                coroutines: FxHashMap::default(),
             })
         } else {
             unreachable!()
-        }
-    }
-
-    pub fn thread_cloned(&self) -> Self {
-        Self {
-            stack: vec![],
-            args_stack: VecDeque::new(),
-            labels: FxHashMap::default(),
-            instructions: self.instructions.clone(),
-            pc: -1,
-            loop_addresses: Vec::new(),
-            variables: FxHashMap::default(),
-            functions: self.functions.clone(),
-            classes: self.classes.clone(),
-            included: self.included.clone(),
-            is_catching: false,
-            returns_to: vec![],
-            block_len: 0,
-            gc: GarbageCollector::new(),
-            file_handles: VecDeque::new(),
-            file_handles_names: VecDeque::new(),
-            last_runned: String::new(),
-            recursive_level: 0,
-            max_recursiveness_level: self.max_recursiveness_level,
-            handles_recursion_count: self.handles_recursion_count,
-            sequestrated_variables: Vec::new(),
-            stack_before: Vec::new(),
-            expected_return_types: Vec::new(),
-            args_to_alloc: Vec::new(),
-            coroutines: FxHashMap::default(),
-            running_coroutines: Vec::new(),
         }
     }
 
@@ -547,56 +451,7 @@ impl VirtualMachine {
         }
     }
 
-    pub fn allocate_variable(&mut self, name: String, value: Value) {
-        let ptr = self.gc.allocate_in_scope(value);
-        self.variables.insert(name, ptr.as_ptr());
-    }
-    
-    pub fn allocate_variable_in_root(&mut self, name: String, value: Value) {
-        let ptr = self.gc.allocate(value);
-        self.variables.insert(name, ptr.as_ptr());
-    }
-
-    pub fn get_variable(&self, name: &str) -> Option<&Value> {
-        if let Some(ptr) = self.variables.get(name) {
-            Some(unsafe { &**ptr})
-        } else {
-            None
-        }
-    }
-
-    pub fn set_variable(&mut self, name: String, value: Value) {
-        if let Some(ptr) = self.variables.get_mut(&name) {
-            unsafe { *(*ptr as *mut Value) = value };
-        } else {
-            let ptr = self.gc.allocate_in_scope(value);
-            self.variables.insert(name, ptr.as_ptr());
-        }
-    }
-
-    pub fn collect_garbage(&mut self) {
-        self.gc.collect();
-    }
-
-    pub fn check_labels_from_pc(&mut self, length: usize) {
-        let mut pos = self.pc;
-        for instruction in self.instructions.iter().skip(self.pc as usize - 1) {
-            pos += 1;
-            if pos as usize >= length {
-                break;
-            }
-            match instruction {
-                Instruction::Label(name) => {
-                    self.labels.insert(name.clone(), pos as u32);
-                    continue;
-                }
-                _ => continue,
-            }
-        }
-    }
-
     pub fn run(&mut self) -> Result<Value, String> {
-        self.gc.enter_scope();
         while self.pc < (self.instructions.len() - 1).try_into().unwrap() {
             self.pc += 1;
             match &self.instructions[self.pc as usize] {
@@ -609,7 +464,19 @@ impl VirtualMachine {
                             return Err(format!("Redefinition of variable: Tried to redefine the variable {}, which is already defined.", name));
                         }
                     }
-                    self.allocate_variable(name.clone(), value.clone());
+                    self.variables
+                        .insert_with_status(name.clone(), value.clone());
+                }
+                Instruction::DeclareStatic(name, value) => {
+                    if self.variables.contains_key(name) {
+                        if self.is_catching {
+                            self.stack.push(Value::Error(format!("Redefinition of variable: Tried to redefine the variable {} as 'static, which is already defined.", name)));
+                            continue;
+                        } else {
+                            return Err(format!("Redefinition of variable: Tried to redefine the variable {} as 'static, which is already defined.", name));
+                        }
+                    }
+                    self.variables.insert_static(name.clone(), value.clone());
                 }
                 Instruction::GetInput => {
                     let mut buffer = String::new();
@@ -673,11 +540,11 @@ impl VirtualMachine {
                         None => {
                             if self.is_catching {
                                 self.stack.push(Value::Error(
-                                    "Could not write to stdout: The self.stack is empty".to_string(),
+                                    "Could not write to stdout: The stack is empty".to_string(),
                                 ))
                             } else {
                                 return Err(
-                                    "Could not write to stdout: The self.stack is empty".to_string()
+                                    "Could not write to stdout: The stack is empty".to_string()
                                 );
                             }
                         }
@@ -740,11 +607,11 @@ impl VirtualMachine {
                         None => {
                             if self.is_catching {
                                 self.stack.push(Value::Error(
-                                    "Could not write to stderr: The self.stack is empty".to_string(),
+                                    "Could not write to stderr: The stack is empty".to_string(),
                                 ))
                             } else {
                                 return Err(
-                                    "Could not write to stderr: The self.stack is empty".to_string()
+                                    "Could not write to stderr: The stack is empty".to_string()
                                 );
                             }
                         }
@@ -774,7 +641,8 @@ impl VirtualMachine {
                             return Err(format!("Cannot assign to undefined variable {}", name));
                         }
                     } else {
-                        self.set_variable(name.clone(), value.clone());
+                        self.variables
+                            .insert_with_status(name.clone(), value.clone());
                         continue;
                     }
                 }
@@ -791,16 +659,17 @@ impl VirtualMachine {
                     } else {
                         let value = self.stack.pop();
                         if let Some(value) = value {
-                            self.set_variable(name.clone(), value.clone());
+                            self.variables
+                                .insert_with_status(name.clone(), value.clone());
                             continue;
                         } else if self.is_catching {
                             self.stack.push(Value::Error(
-                                "Cannot assign to {} from the self.stack because the self.stack is empty"
+                                "Cannot assign to {} from the stack because the stack is empty"
                                     .to_string(),
                             ))
                         } else {
                             return Err(
-                                "Cannot assign to {} from the self.stack because the self.stack is empty"
+                                "Cannot assign to {} from the stack because the stack is empty"
                                     .to_string(),
                             );
                         }
@@ -820,7 +689,7 @@ impl VirtualMachine {
                 Instruction::Load(name) => {
                     let value = self.variables.get(name);
                     if let Some(value) = value {
-                        self.stack.push(unsafe { std::ptr::read_volatile(*value) });
+                        self.stack.push(value.clone());
                         continue;
                     } else if self.is_catching {
                         self.stack.push(Value::Error(format!(
@@ -864,9 +733,9 @@ impl VirtualMachine {
                             _ => continue,
                         }
                     } else if self.is_catching {
-                        self.stack.push(Value::Error(format!("Cannot jump to label {} according to the top self.stack value because the self.stack is empty", label)));
+                        self.stack.push(Value::Error(format!("Cannot jump to label {} according to the top stack value because the stack is empty", label)));
                     } else {
-                        return Err(format!("Cannot jump to label {} according to the top self.stack value because the self.stack is empty", label));
+                        return Err(format!("Cannot jump to label {} according to the top stack value because the stack is empty", label));
                     }
                 }
                 Instruction::Add => {
@@ -957,9 +826,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Sub => {
@@ -968,7 +837,7 @@ impl VirtualMachine {
                             match val {
                                 Value::Int(i1) => match val2 {
                                     Value::Int(i) => {
-                                        self.stack.push(Value::Int(i - i1));
+                                        self.stack.push(Value::Int(i1 - i));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -980,7 +849,7 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(i1) => match val2 {
                                     Value::BigInt(i) => {
-                                        self.stack.push(Value::BigInt(i - i1));
+                                        self.stack.push(Value::BigInt(i1 - i));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -992,7 +861,7 @@ impl VirtualMachine {
                                 },
                                 Value::Float(f1) => match val2 {
                                     Value::Float(f) => {
-                                        self.stack.push(Value::Float(f - f1));
+                                        self.stack.push(Value::Float(f1 - f));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1004,7 +873,7 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(f1) => match val2 {
                                     Value::LFloat(f) => {
-                                        self.stack.push(Value::LFloat(f - f1));
+                                        self.stack.push(Value::LFloat(f1 - f));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1067,9 +936,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Mul => {
@@ -1140,9 +1009,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Div => {
@@ -1151,7 +1020,7 @@ impl VirtualMachine {
                             match val {
                                 Value::Int(i1) => match val2 {
                                     Value::Int(i) => {
-                                        self.stack.push(Value::Int(i / i1));
+                                        self.stack.push(Value::Int(i1 / i));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1163,7 +1032,7 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(i1) => match val2 {
                                     Value::BigInt(i) => {
-                                        self.stack.push(Value::BigInt(i / i1));
+                                        self.stack.push(Value::BigInt(i1 / i));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1175,7 +1044,7 @@ impl VirtualMachine {
                                 },
                                 Value::Float(f1) => match val2 {
                                     Value::Float(f) => {
-                                        self.stack.push(Value::Float(f / f1));
+                                        self.stack.push(Value::Float(f1 / f));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1187,7 +1056,7 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(f1) => match val2 {
                                     Value::LFloat(f) => {
-                                        self.stack.push(Value::LFloat(f / f1));
+                                        self.stack.push(Value::LFloat(f1 / f));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1213,9 +1082,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Mod => {
@@ -1224,7 +1093,7 @@ impl VirtualMachine {
                             match val {
                                 Value::Int(i1) => match val2 {
                                     Value::Int(i) => {
-                                        self.stack.push(Value::Int(i % i1));
+                                        self.stack.push(Value::Int(i1 % i));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1236,7 +1105,7 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(i1) => match val2 {
                                     Value::BigInt(i) => {
-                                        self.stack.push(Value::BigInt(i % i1));
+                                        self.stack.push(Value::BigInt(i1 % i));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1248,7 +1117,7 @@ impl VirtualMachine {
                                 },
                                 Value::Float(f1) => match val2 {
                                     Value::Float(f) => {
-                                        self.stack.push(Value::Float(f % f1));
+                                        self.stack.push(Value::Float(f1 % f));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1260,7 +1129,7 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(f1) => match val2 {
                                     Value::LFloat(f) => {
-                                        self.stack.push(Value::LFloat(f % f1));
+                                        self.stack.push(Value::LFloat(f1 % f));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1286,9 +1155,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Pow => {
@@ -1304,7 +1173,7 @@ impl VirtualMachine {
                                                 return Err(format!("Exponentiation is not supported with a negative exponent {}", value_to_readable(&val2)));
                                             }
                                         }
-                                        self.stack.push(Value::Int(i.pow(i1.try_into().unwrap())));
+                                        self.stack.push(Value::Int(i1.pow(i.try_into().unwrap())));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1324,7 +1193,7 @@ impl VirtualMachine {
                                             }
                                         }
                                         self.stack
-                                            .push(Value::BigInt(i.pow(i1.try_into().unwrap())));
+                                            .push(Value::BigInt(i1.pow(i.try_into().unwrap())));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1336,7 +1205,7 @@ impl VirtualMachine {
                                 },
                                 Value::Float(f1) => match val2 {
                                     Value::Float(f) => {
-                                        self.stack.push(Value::Float(f.powf(f1)));
+                                        self.stack.push(Value::Float(f1.powf(f)));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1348,7 +1217,7 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(f1) => match val2 {
                                     Value::LFloat(f) => {
-                                        self.stack.push(Value::LFloat(f.powf(f1)));
+                                        self.stack.push(Value::LFloat(f1.powf(f)));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1374,9 +1243,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::And => {
@@ -1411,9 +1280,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Or => {
@@ -1448,9 +1317,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Xor => {
@@ -1485,9 +1354,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Not => {
@@ -1524,9 +1393,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Ne => {
@@ -1541,9 +1410,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Gt => {
@@ -1552,7 +1421,7 @@ impl VirtualMachine {
                             match val {
                                 Value::Int(b1) => match val2 {
                                     Value::Int(b2) => {
-                                        self.stack.push(Value::Boolean(b2 > b1));
+                                        self.stack.push(Value::Boolean(b1 > b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1564,7 +1433,7 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(b1) => match val2 {
                                     Value::BigInt(b2) => {
-                                        self.stack.push(Value::Boolean(b2 > b1));
+                                        self.stack.push(Value::Boolean(b1 > b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1576,7 +1445,7 @@ impl VirtualMachine {
                                 },
                                 Value::Float(b1) => match val2 {
                                     Value::Float(b2) => {
-                                        self.stack.push(Value::Boolean(b2 > b1));
+                                        self.stack.push(Value::Boolean(b1 > b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1588,7 +1457,7 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(b1) => match val2 {
                                     Value::LFloat(b2) => {
-                                        self.stack.push(Value::Boolean(b2 > b1));
+                                        self.stack.push(Value::Boolean(b1 > b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1614,9 +1483,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Lt => {
@@ -1625,7 +1494,7 @@ impl VirtualMachine {
                             match val {
                                 Value::Int(b1) => match val2 {
                                     Value::Int(b2) => {
-                                        self.stack.push(Value::Boolean(b2 < b1));
+                                        self.stack.push(Value::Boolean(b1 < b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1637,7 +1506,7 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(b1) => match val2 {
                                     Value::BigInt(b2) => {
-                                        self.stack.push(Value::Boolean(b2 < b1));
+                                        self.stack.push(Value::Boolean(b1 < b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1649,7 +1518,7 @@ impl VirtualMachine {
                                 },
                                 Value::Float(b1) => match val2 {
                                     Value::Float(b2) => {
-                                        self.stack.push(Value::Boolean(b2 < b1));
+                                        self.stack.push(Value::Boolean(b1 < b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1661,7 +1530,7 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(b1) => match val2 {
                                     Value::LFloat(b2) => {
-                                        self.stack.push(Value::Boolean(b2 < b1));
+                                        self.stack.push(Value::Boolean(b1 < b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1687,9 +1556,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Gte => {
@@ -1698,7 +1567,7 @@ impl VirtualMachine {
                             match val {
                                 Value::Int(b1) => match val2 {
                                     Value::Int(b2) => {
-                                        self.stack.push(Value::Boolean(b2 >= b1));
+                                        self.stack.push(Value::Boolean(b1 >= b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1710,7 +1579,7 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(b1) => match val2 {
                                     Value::BigInt(b2) => {
-                                        self.stack.push(Value::Boolean(b2 >= b1));
+                                        self.stack.push(Value::Boolean(b1 >= b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1722,7 +1591,7 @@ impl VirtualMachine {
                                 },
                                 Value::Float(b1) => match val2 {
                                     Value::Float(b2) => {
-                                        self.stack.push(Value::Boolean(b2 >= b1));
+                                        self.stack.push(Value::Boolean(b1 >= b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1734,7 +1603,7 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(b1) => match val2 {
                                     Value::LFloat(b2) => {
-                                        self.stack.push(Value::Boolean(b2 >= b1));
+                                        self.stack.push(Value::Boolean(b1 >= b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1760,9 +1629,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Lte => {
@@ -1771,7 +1640,7 @@ impl VirtualMachine {
                             match val {
                                 Value::Int(b1) => match val2 {
                                     Value::Int(b2) => {
-                                        self.stack.push(Value::Boolean(b2 <= b1));
+                                        self.stack.push(Value::Boolean(b1 <= b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1783,7 +1652,7 @@ impl VirtualMachine {
                                 },
                                 Value::BigInt(b1) => match val2 {
                                     Value::BigInt(b2) => {
-                                        self.stack.push(Value::Boolean(b2 <= b1));
+                                        self.stack.push(Value::Boolean(b1 <= b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1795,7 +1664,7 @@ impl VirtualMachine {
                                 },
                                 Value::Float(b1) => match val2 {
                                     Value::Float(b2) => {
-                                        self.stack.push(Value::Boolean(b2 <= b1));
+                                        self.stack.push(Value::Boolean(b1 <= b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1807,7 +1676,7 @@ impl VirtualMachine {
                                 },
                                 Value::LFloat(b1) => match val2 {
                                     Value::LFloat(b2) => {
-                                        self.stack.push(Value::Boolean(b2 <= b1));
+                                        self.stack.push(Value::Boolean(b1 <= b2));
                                     }
                                     _ => {
                                         if self.is_catching {
@@ -1833,9 +1702,9 @@ impl VirtualMachine {
                         }
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Label(_) => continue,
@@ -1904,17 +1773,6 @@ impl VirtualMachine {
                                 }
                             }
                             (Function::Interpreted(fun), _) => {
-                                if self.handles_recursion_count {
-                                    if fun.name == self.last_runned {
-                                        self.recursive_level += 1;
-                                        if self.recursive_level >= self.max_recursiveness_level {
-                                            return Err(format!("Max recursiveness level depth exceeded: Function `{}` called itself {} times.", fun.name, self.recursive_level))
-                                        }
-                                    } else {
-                                        self.recursive_level = 0;
-                                        self.last_runned = fun.name.clone();
-                                    }
-                                }
                                 let mut args: VecDeque<Value> = VecDeque::new();
                                 if self.args_stack.len() != fun.args.len() {
                                     if self.is_catching {
@@ -1930,8 +1788,7 @@ impl VirtualMachine {
                                     }
                                 }
                                 args.append(&mut self.args_stack);
-                                let typechecks =
-                                    type_check_value(args.clone().into(), fun.args.clone());
+                                let typechecks = type_check_value(args.clone().into(), fun.args.clone());
                                 if let Err(err) = typechecks {
                                     if self.is_catching {
                                         self.stack.push(Value::Error(err));
@@ -1939,32 +1796,26 @@ impl VirtualMachine {
                                         return Err(err);
                                     }
                                 } else {
-                                    self.stack_before = self.stack.clone();
-                                    self.expected_return_types.push(fun.returns.clone());
-                                    self.returns_to.push(self.pc + 1);
+                                    self.returns_to.push(self.pc + 3);
                                     let fun_body_len = fun.body.len();
                                     self.instructions
                                         .drain(self.pc as usize..(self.pc as usize));
                                     let other_part = self
                                         .instructions
-                                        .drain((self.pc as usize + 1)..)
+                                        .drain((self.pc as usize)..)
                                         .collect::<Vec<Instruction>>();
+                                    self.instructions.push_back(Instruction::GCMap);
                                     self.instructions
                                         .append(&mut VecDeque::from(fun.body.clone()));
+                                    self.instructions.push_back(Instruction::GCTake);
                                     self.instructions.append(&mut VecDeque::from(other_part));
                                     self.block_len = fun_body_len as i64;
                                     let zipped = fun.args.clone().into_iter();
                                     let zipped = zipped.zip(args.into_iter());
-                                    let mut new_args = FxHashMap::default();
                                     for ((varname, _), value) in zipped {
-                                        new_args.insert(varname, value);
+                                        self.variables.insert(varname, value);
                                     }
-                                    self.args_to_alloc.push(new_args);
-                                    self.check_labels_from_pc(self.pc as usize);
                                 }
-                            }
-                            _ => {
-                                return Err(format!("How did we get here? Closures cannot be stored as normal functions!"));
                             }
                         }
                     }
@@ -1972,12 +1823,12 @@ impl VirtualMachine {
                 Instruction::Pop(name) => {
                     let top = self.stack.pop();
                     if let Some(top) = top {
-                        self.allocate_variable(name.clone(), top);
+                        self.variables.insert_with_status(name.to_string(), top);
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::ToArgsStack => {
@@ -1986,9 +1837,9 @@ impl VirtualMachine {
                         self.args_stack.push_back(top);
                     } else if self.is_catching {
                         self.stack
-                            .push(Value::Error(String::from("The self.stack is empty")));
+                            .push(Value::Error(String::from("The stack is empty")));
                     } else {
-                        return Err(String::from("The self.stack is empty"));
+                        return Err(String::from("The stack is empty"));
                     }
                 }
                 Instruction::Return => {
@@ -1999,38 +1850,6 @@ impl VirtualMachine {
                             self.instructions.drain(
                                 (self.pc as usize + 1)..((self.pc + self.block_len) as usize),
                             );
-                            let value_to_return = self.stack.pop();
-                            match value_to_return {
-                                Some(value) => {
-                                    let stack_ref: &Vec<Value> = self.stack.as_ref();
-                                    if &self.stack_before != stack_ref {
-                                        return Err(format!("Type checking failed: the function `{}` (latest function called) modified the stack beyond its bounds", self.last_runned))
-                                    } else {
-                                        let expected_to_return = self.expected_return_types.pop();
-                                        match expected_to_return {
-                                            Some(type_) => {
-                                                let typechecks = type_check_value(vec![value.clone()], vec![(String::from("random_return_arg_placeholder"), type_.clone())]);
-                                                match typechecks {
-                                                    Ok(_) => {
-                                                        self.stack.push(value);
-                                                        continue;
-                                                    }
-                                                    Err(_) => {
-                                                        return Err(format!("Type checking failed: the function `{}` has a signature with return type `{}` but returned a value of type `{}` ({:?}).\nMaybe change the return type to `{}`?",
-                                                        self.last_runned, format!("{:?}", type_).to_lowercase(), value_to_typeof(&value), &value, value_to_typeof(&value)))
-                                                    }
-                                                }
-                                            }
-                                            None => {
-                                                return Err(format!("Type checking failed: the function {} wasn't expected to return from this point", self.last_runned))
-                                            }
-                                        }
-                                    }
-                                }
-                                None => {
-
-                                }
-                            }
                         }
                         None => {
                             self.pc = (self.instructions.len() - 1) as i64;
@@ -2049,7 +1868,7 @@ impl VirtualMachine {
                         }
                     } else {
                         let class = self.variables.get(classname).unwrap();
-                        match unsafe { std::ptr::read_volatile(*class) } {
+                        match class {
                             Value::Class(class) => {
                                 if !class.properties.contains_key(property) {
                                     if self.is_catching {
@@ -2093,7 +1912,7 @@ impl VirtualMachine {
                         }
                     } else {
                         let class = self.variables.get(classname).unwrap();
-                        match unsafe { std::ptr::read_volatile(*class) } {
+                        match class {
                             Value::Class(class) => {
                                 if !class.staticmethods.contains_key(name) {
                                     if self.is_catching {
@@ -2173,9 +1992,9 @@ impl VirtualMachine {
                             return Err(format!("Cannot use undefined variable {}", classname));
                         }
                     } else {
-                        let class = self.variables.get(classname).unwrap();
-                        match unsafe { std::ptr::read_volatile(*class) } {
-                            Value::Class(mut class) => {
+                        let class = self.variables.get_mut(classname).unwrap();
+                        match class {
+                            Value::Class(class) => {
                                 class.properties.insert(name.to_string(), val.clone());
                             }
                             _ => {
@@ -2203,7 +2022,7 @@ impl VirtualMachine {
                         }
                     } else {
                         let class = self.variables.get_mut(classname).unwrap();
-                        match unsafe { std::ptr::read_volatile(*class) } {
+                        match class {
                             Value::Class(class) => {
                                 self.stack
                                     .push(Value::Boolean(class.properties.contains_key(property)));
@@ -2233,7 +2052,7 @@ impl VirtualMachine {
                         }
                     } else {
                         let class = self.variables.get_mut(classname).unwrap();
-                        match unsafe { std::ptr::read_volatile(*class) } {
+                        match class {
                             Value::Class(class) => {
                                 self.stack.push(Value::Boolean(
                                     class.staticmethods.contains_key(staticmethod),
@@ -2297,9 +2116,21 @@ impl VirtualMachine {
                 Instruction::EndFunction => {
                     return Err(format!("EndFunction is not a standalone instruction"))
                 }
+                Instruction::GCMap => {
+                    self.variables.map();
+                }
+                Instruction::GCTake => {
+                    self.variables.take();
+                }
+                Instruction::ForgetVariable(name) => {
+                    self.variables.forget(name.clone());
+                }
+                Instruction::Dealloc(name) => {
+                    self.variables.remove(name);
+                }
                 Instruction::Duplicate => {
                     if self.stack.len() == 0 {
-                        return Err(format!("Cannot use duplicate on an empty self.stack"))
+                        return Err(format!("Cannot use duplicate on an empty stack"))
                     }
                     let val = self.stack.pop().unwrap();
                     self.stack.push(val.clone());
@@ -2320,7 +2151,7 @@ impl VirtualMachine {
                         if let Err(err) = instructions {
                             return Err(format!("Could not read instructions from file: {}", err))
                         } else if let Ok(ins) = instructions {
-                            let mut new_runtime_proto = VirtualMachine::new(ins, path, self.max_recursiveness_level, self.handles_recursion_count)?;
+                            let mut new_runtime_proto = VirtualMachine::new(ins, path)?;
                             new_runtime_proto.check_labels();
                             new_runtime_proto.run()?;
                             self.functions.extend(new_runtime_proto.functions.into_iter());
@@ -2333,7 +2164,7 @@ impl VirtualMachine {
                     }
                 }
                 Instruction::LoopStart => {
-                    self.loop_addresses.push(self.pc); // Push the loop start address onto the self.stack
+                    self.loop_addresses.push(self.pc); // Push the loop start address onto the stack
                 }
                 Instruction::LoopEnd => {
                     if let Some(Value::Boolean(val)) = self.stack.pop() {
@@ -2395,7 +2226,19 @@ impl VirtualMachine {
                     if let Some(item) = item {
                         match item {
                             Value::PtrWrapper(ptr) => {
-                                self.stack.push(unsafe { ptr.as_ref().clone() });
+                                if ptr.is_null() {
+                                    if self.is_catching {
+                                        self.stack.push(Value::Error(format!(
+                                            "Dereferencing a null pointer is undefined behaviour"
+                                        )));
+                                    } else {
+                                        return Err(format!(
+                                            "Dereferencing a null pointer is undefined behaviour"
+                                        ));
+                                    }
+                                } else {
+                                    self.stack.push(unsafe { ptr.as_ref().unwrap().clone() });
+                                }
                             }
                             _ => {
                                 if self.is_catching {
@@ -2412,11 +2255,11 @@ impl VirtualMachine {
                     } else {
                         if self.is_catching {
                             self.stack.push(Value::Error(format!(
-                                "Cannot dereference pointer because the self.stack is empty"
+                                "Cannot dereference pointer because the stack is empty"
                             )));
                         } else {
                             return Err(format!(
-                                "Cannot dereference pointer because the self.stack is empty"
+                                "Cannot dereference pointer because the stack is empty"
                             ));
                         }
                     }
@@ -2426,9 +2269,21 @@ impl VirtualMachine {
                 }
                 Instruction::MemoryReadVolatile(loc) => {
                     if let Value::PtrWrapper(ptr) = loc {
-                        unsafe {
-                            let value = std::ptr::read_volatile(ptr.as_ptr());
-                            self.stack.push(value);
+                        if ptr.is_null() {
+                            if self.is_catching {
+                                self.stack.push(Value::Error(format!(
+                                    "Cannot read from null pointer"
+                                )));
+                            } else {
+                                return Err(format!(
+                                    "Cannot read from null pointer"
+                                ));
+                            }
+                        } else {
+                            unsafe {
+                                let value = std::ptr::read_volatile(*ptr as *const Value);
+                                self.stack.push(value);
+                            }
                         }
                     } else {
                         if self.is_catching {
@@ -2444,8 +2299,20 @@ impl VirtualMachine {
                 }
                 Instruction::MemoryWriteVolatile(src, dst) => {
                     if let Value::PtrWrapper(ptr) = dst {
-                        unsafe {
-                            std::ptr::write_volatile(ptr.as_ptr(), src.clone());
+                        if ptr.is_null() {
+                            if self.is_catching {
+                                self.stack.push(Value::Error(format!(
+                                    "Cannot write to null pointer"
+                                )));
+                            } else {
+                                return Err(format!(
+                                    "Cannot write to null pointer"
+                                ));
+                            }
+                        } else {
+                            unsafe {
+                                std::ptr::write_volatile(ptr.as_mut().unwrap(), src.clone());
+                            }
                         }
                     } else {
                         if self.is_catching {
@@ -2459,946 +2326,6 @@ impl VirtualMachine {
                         }
                     }
                 }
-                Instruction::Collect => {
-                    self.collect_garbage();
-                }
-                Instruction::EnterScope => {
-                    self.gc.enter_scope();
-                }
-                Instruction::LeaveScope => {
-                    self.gc.leave_scope();
-                }
-                Instruction::AsRef => {
-                    if let Some(mut val) = self.stack.pop() {
-                        self.stack.push(Value::PtrWrapper(unsafe { NonNull::new_unchecked(&mut val as *mut Value) }));
-                        self.stack.push(val);
-                        let len = self.stack.len();
-                        self.stack.swap(len - 1, len - 2);
-                    } else {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(
-                                "Could not convert to pointer: The self.stack is empty".to_string(),
-                            ))
-                        } else {
-                            return Err(
-                                "Could not convert to pointer: The self.stack is empty".to_string()
-                            );
-                        }
-                    }
-                }
-                Instruction::HasRefSameLoc => {
-                    if let Some(ptr) = self.stack.pop() {
-                        if let Some(ptr2) = self.stack.pop() {
-                            if let Value::PtrWrapper(ptr) = ptr {
-                                if let Value::PtrWrapper(ptr2) = ptr2 {
-                                    self.stack.push(Value::Boolean(ptr == ptr2));
-                                } else {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(
-                                            "HasRefSameLoc expects two pointers for arguments".to_string(),
-                                        ))
-                                    } else {
-                                        return Err(
-                                            "HasRefSameLoc expects two pointers for arguments".to_string(),
-                                        );
-                                    }
-                                }
-                            } else {
-                                if self.is_catching {
-                                    self.stack.push(Value::Error(
-                                        "HasRefSameLoc expects two pointers for arguments".to_string(),
-                                    ))
-                                } else {
-                                    return Err(
-                                        "HasRefSameLoc expects two pointers for arguments".to_string(),
-                                    );
-                                }
-                            }
-                        } else {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(
-                                    "Could not compare pointer's location: The self.stack has only one operand".to_string(),
-                                ))
-                            } else {
-                                return Err(
-                                    "Could not compare pointer's location: The self.stack has only one operand".to_string()
-                                );
-                            }
-                        }
-                    } else {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(
-                                "Could not compare pointer's location: The self.stack is empty".to_string(),
-                            ))
-                        } else {
-                            return Err(
-                                "Could not compare pointer's location: The self.stack is empty".to_string()
-                            );
-                        }
-                    }
-                }
-                Instruction::RefDifferenceInLoc => {
-                    if let Some(ptr) = self.stack.pop() {
-                        if let Some(ptr2) = self.stack.pop() {
-                            if let Value::PtrWrapper(ptr) = ptr {
-                                if let Value::PtrWrapper(ptr2) = ptr2 {
-                                    self.stack.push(Value::BigInt(unsafe { (ptr.as_ptr() as *const u8).offset_from(ptr2.as_ptr() as *const u8) } as i64));
-                                } else {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(
-                                            "HasRefSameLoc expects two pointers for arguments".to_string(),
-                                        ))
-                                    } else {
-                                        return Err(
-                                            "HasRefSameLoc expects two pointers for arguments".to_string(),
-                                        );
-                                    }
-                                }
-                            } else {
-                                if self.is_catching {
-                                    self.stack.push(Value::Error(
-                                        "HasRefSameLoc expects two pointers for arguments".to_string(),
-                                    ))
-                                } else {
-                                    return Err(
-                                        "HasRefSameLoc expects two pointers for arguments".to_string(),
-                                    );
-                                }
-                            }
-                        } else {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(
-                                    "Could not compare pointer's location: The self.stack has only one operand".to_string(),
-                                ))
-                            } else {
-                                return Err(
-                                    "Could not compare pointer's location: The self.stack has only one operand".to_string()
-                                );
-                            }
-                        }
-                    } else {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(
-                                "Could not compare pointer's location: The self.stack is empty".to_string(),
-                            ))
-                        } else {
-                            return Err(
-                                "Could not compare pointer's location: The self.stack is empty".to_string()
-                            );
-                        }
-                    }
-                }
-                Instruction::Typeof => {
-                    if let Some(val) = self.stack.pop() {
-                        self.stack.push(Value::String(value_to_typeof(&val)));
-                        self.stack.push(val);
-                        let len = self.stack.len();
-                        self.stack.swap(len - 1, len - 2);
-                    } else {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(
-                                "Couldn't apply typeof operator: The self.stack is empty".to_string(),
-                            ))
-                        } else {
-                            return Err(
-                                "Couldn't apply typeof operator: The self.stack is empty".to_string(),
-                            );
-                        }
-                    }
-                }
-                Instruction::IsInstanceof(name) => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Value::Class(c) = val {
-                            if &c.name == name {
-                                self.stack.push(Value::Class(c));
-                                self.stack.push(Value::Boolean(true));
-                            } else {
-                                self.stack.push(Value::Class(c));
-                                self.stack.push(Value::Boolean(false));
-                            }
-                        } else {
-                            self.stack.push(val);
-                            self.stack.push(Value::Boolean(false));
-                        }
-                    } else {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(
-                                "Couldn't apply isinstanceof operator: The self.stack is empty".to_string(),
-                            ))
-                        } else {
-                            return Err(
-                                "Couldn't apply isinstanceof operator: The self.stack is empty".to_string(),
-                            );
-                        }
-                    }
-                }
-                Instruction::GetReadFileHandle(name) => {
-                    let res = File::open(name);
-                    match res {
-                        Ok(file) => {
-                            self.file_handles.push_back((file, false));
-                            self.file_handles_names.push_back(name.clone());
-                            let len = self.file_handles.len();
-                            let file_pointer = &mut self.file_handles.get_mut(len - 1).unwrap().0 as *mut File;
-                            self.stack.push(Value::FileHandle((NonNull::new(file_pointer).unwrap(), false)));
-                        }
-                        Err(err) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Error creating read file handle: {}", err
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Error creating read file handle: {}", err
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::GetWriteFileHandle(name) => {
-                    let res = File::options().read(true).write(true).create(true).open(name);
-                    match res {
-                        Ok(file) => {
-                            self.file_handles.push_back((file, true));
-                            self.file_handles_names.push_back(name.clone());
-                            let len = self.file_handles.len();
-                            let file_pointer = &mut self.file_handles.get_mut(len - 1).unwrap().0 as *mut File;
-                            self.stack.push(Value::FileHandle((NonNull::new(file_pointer).unwrap(), true)));
-                        }
-                        Err(err) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Error creating write file handle: {}", err
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Error creating write file handle: {}", err
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::CloseFileHandle(name) => {
-                    let indexof = self.file_handles_names.binary_search(name);
-                    match indexof {
-                        Ok(index) => {
-                            let _handle = self.file_handles.remove(index).unwrap();
-                            self.file_handles_names.remove(index);
-                        }
-                        Err(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The file handle for `{}` is not opened.", name
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The file handle for `{}` is not opened.", name
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::PushFileHandlePointer(name) => {
-                    let indexof = self.file_handles_names.binary_search(name);
-                    match indexof {
-                        Ok(index) => {
-                            let (handle, is_writeable) = self.file_handles.get_mut(index).unwrap();
-                            self.stack.push(Value::FileHandle((NonNull::new(handle).unwrap(), *is_writeable)));
-                        }
-                        Err(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The file handle for `{}` is not opened.", name
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The file handle for `{}` is not opened.", name
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::ReadFromFileHandle(bytes) => {
-                    match self.stack.pop() {
-                        Some(Value::FileHandle((handle, _))) => {
-                            let reference = unsafe { handle.as_ptr().as_mut().unwrap() };
-                            let mut buffer = Vec::with_capacity(*bytes);
-                            let res = reference.read_exact(&mut buffer);
-                            match res {
-                                Ok(_) => {
-                                    self.stack.push(Value::Bytes(buffer));
-                                }
-                                Err(e) => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Error reading {} bytes from file handle: {}", bytes, e
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "Error reading {} bytes from file handle: {}", bytes, e
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Tried to read from a non-File handle object"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Tried to read from a non-File handle object"
-                                ));
-                            }
-                        }
-                        None => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The self.stack is empty (at reading {} bytes from file handle with dynamic name from self.stack)", bytes
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The self.stack is empty (at reading {} bytes from file handle with dynamic name from self.stack)", bytes
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::ReadFileHandleToString => {
-                    match self.stack.pop() {
-                        Some(Value::FileHandle((handle, _))) => {
-                            let reference = unsafe { handle.as_ptr().as_mut().unwrap() };
-                            let mut buffer = String::new();
-                            let res = reference.read_to_string(&mut buffer);
-                            match res {
-                                Ok(_) => {
-                                    self.stack.push(Value::String(buffer));
-                                }
-                                Err(e) => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Error reading file handle to string: {}", e
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "Error reading file handle to string: {}", e
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Tried to read from a non-File handle object"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Tried to read from a non-File handle object"
-                                ));
-                            }
-                        }
-                        None => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The self.stack is empty (at reading from file handle with dynamic name from self.stack to string)"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The self.stack is empty (at reading from file handle with dynamic name from self.stack to string)"
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::ReadFileHandleToBytes => {
-                    match self.stack.pop() {
-                        Some(Value::FileHandle((handle, _))) => {
-                            let reference = unsafe { handle.as_ptr().as_mut().unwrap() };
-                            let mut buffer = Vec::new();
-                            let res = reference.read_to_end(&mut buffer);
-                            match res {
-                                Ok(_) => {
-                                    self.stack.push(Value::Bytes(buffer));
-                                }
-                                Err(e) => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Error reading file handle to bytes: {}", e
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "Error reading file handle to bytes: {}", e
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Tried to read from a non-File handle object"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Tried to read from a non-File handle object"
-                                ));
-                            }
-                        }
-                        None => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The self.stack is empty (at reading from file handle with dynamic name from self.stack to bytes)"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The self.stack is empty (at reading from file handle with dynamic name from self.stack to bytes)"
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::WriteStringToFileHandle => {
-                    let string = self.stack.pop();
-                    let file_ref = self.stack.pop();
-                    match string {
-                        Some(Value::String(s)) => {
-                            match file_ref {
-                                Some(Value::FileHandle((handle, is_writeable))) => {
-                                    if !is_writeable {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
-                                                "The specified file handle is not writeable"
-                                            )));
-                                        } else {
-                                            return Err(format!(
-                                                "The specified file handle is not writeable"
-                                            ));
-                                        }
-                                    } else {
-                                        let reference = unsafe { handle.as_ptr().as_mut().unwrap() };
-                                        let res = write!(reference, "{}", s);
-                                        match res {
-                                            Err(err) => {
-                                                if self.is_catching {
-                                                    self.stack.push(Value::Error(format!(
-                                                        "Error writing to file handle: {}", err
-                                                    )));
-                                                } else {
-                                                    return Err(format!(
-                                                        "Error writing to file handle: {}", err
-                                                    ));
-                                                }
-                                            }
-                                            _ => continue,
-                                        }
-                                    }
-                                }
-                                Some(_) => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Expected a file handle to write to"
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "Expected a file handle to write to"
-                                        ));
-                                    }
-                                }
-                                None => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "The self.stack is empty (at collecting file handle from self.stack)"
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "The self.stack is empty (at collecting file handle from self.stack)"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Expected string to write to a file handle"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Expected string to write to a file handle"
-                                ));
-                            }
-                        }
-                        None => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The self.stack is empty (at collecting string from self.stack)"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The self.stack is empty (at collecting string from self.stack)"
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::WriteBytesToFileHandle => {
-                    let bytes = self.stack.pop();
-                    let file_ref = self.stack.pop();
-                    match bytes {
-                        Some(Value::Bytes(b)) => {
-                            match file_ref {
-                                Some(Value::FileHandle((handle, is_writeable))) => {
-                                    if !is_writeable {
-                                        if self.is_catching {
-                                            self.stack.push(Value::Error(format!(
-                                                "The specified file handle is not writeable"
-                                            )));
-                                        } else {
-                                            return Err(format!(
-                                                "The specified file handle is not writeable"
-                                            ));
-                                        }
-                                    } else {
-                                        let reference = unsafe { handle.as_ptr().as_mut().unwrap() };
-                                        let res = reference.write_all(b.as_slice());
-                                        match res {
-                                            Err(err) => {
-                                                if self.is_catching {
-                                                    self.stack.push(Value::Error(format!(
-                                                        "Error writing to file handle: {}", err
-                                                    )));
-                                                } else {
-                                                    return Err(format!(
-                                                        "Error writing to file handle: {}", err
-                                                    ));
-                                                }
-                                            }
-                                            _ => continue,
-                                        }
-                                    }
-                                }
-                                Some(_) => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Expected a file handle to write to"
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "Expected a file handle to write to"
-                                        ));
-                                    }
-                                }
-                                None => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "The self.stack is empty (at collecting file handle from self.stack)"
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "The self.stack is empty (at collecting file handle from self.stack)"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Expected bytes to write to a file handle"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Expected bytes to write to a file handle"
-                                ));
-                            }
-                        }
-                        None => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The self.stack is empty (at collecting string from self.stack)"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The self.stack is empty (at collecting string from self.stack)"
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::RestoreSequestratedVariables => {
-                    if let Some(mut v) = self.sequestrated_variables.pop() {
-                        self.variables = v;
-                    } else {
-                        return Err(format!("Could not restore variables: variables are not actually sequestrated"));
-                    }
-                }
-                Instruction::SequestrateVariables => {
-                    let cloned = self.variables.clone();
-                    self.variables.clear();
-                    self.sequestrated_variables.push(cloned);
-                }
-                Instruction::GetReadFileHandleStack => {
-                    match self.stack.pop() {
-                        Some(Value::String(name)) => {
-                            let res = File::open(&name);
-                            match res {
-                                Ok(file) => {
-                                    self.file_handles.push_back((file, false));
-                                    self.file_handles_names.push_back(name.clone());
-                                    let len = self.file_handles.len();
-                                    let file_pointer = &mut self.file_handles.get_mut(len - 1).unwrap().0 as *mut File;
-                                    self.stack.push(Value::FileHandle((NonNull::new(file_pointer).unwrap(), false)));
-                                }
-                                Err(err) => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Error creating read file handle: {}", err
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "Error creating read file handle: {}", err
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Expected a string for opening the file handle"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Expected a string for opening the file handle"
-                                ));
-                            }
-                        }
-                        None => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The self.stack is empty (at getting read file handle for file from self.stack)"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The self.stack is empty (at getting read file handle for file from self.stack)"
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::GetWriteFileHandleStack => {
-                    match self.stack.pop() {
-                        Some(Value::String(name)) => {
-                            let res = File::options().read(true).write(true).create(true).open(&name);
-                            match res {
-                                Ok(file) => {
-                                    self.file_handles.push_back((file, true));
-                                    self.file_handles_names.push_back(name.clone());
-                                    let len = self.file_handles.len();
-                                    let file_pointer = &mut self.file_handles.get_mut(len - 1).unwrap().0 as *mut File;
-                                    self.stack.push(Value::FileHandle((NonNull::new(file_pointer).unwrap(), true)));
-                                }
-                                Err(err) => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Error creating write file handle: {}", err
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "Error creating write file handle: {}", err
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Expected a string for opening the file handle"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Expected a string for opening the file handle"
-                                ));
-                            }
-                        }
-                        None => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The self.stack is empty (at getting write file handle for file from self.stack)"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The self.stack is empty (at getting write file handle for file from self.stack)"
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::CloseFileHandleStack => {
-                    match self.stack.pop() {
-                        Some(Value::String(name)) => {
-                            let indexof = self.file_handles_names.binary_search(&name);
-                            match indexof {
-                                Ok(index) => {
-                                    let _handle = self.file_handles.remove(index).unwrap();
-                                    self.file_handles_names.remove(index);
-                                }
-                                Err(_) => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "The file handle for `{}` is not opened.", name
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "The file handle for `{}` is not opened.", name
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Expected a string for closening the file handle"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Expected a string for closening the file handle"
-                                ));
-                            }
-                        }
-                        None => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The self.stack is empty (at closing file handle for file from self.stack)"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The self.stack is empty (at closing file handle for file from self.stack)"
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::ReadFromFileHandleStack => {
-                    match self.stack.pop() {
-                        Some(Value::Int(bytes)) => {
-                            if bytes < 1 {
-                                if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
-                                        "Cannot read negative bytes: {}", bytes
-                                    )));
-                                } else {
-                                    return Err(format!(
-                                        "Cannot read negative bytes: {}", bytes
-                                    ));
-                                }
-                            }
-                            match self.stack.pop() {
-                                Some(Value::FileHandle((handle, _))) => {
-                                    let reference = unsafe { handle.as_ptr().as_mut().unwrap() };
-                                    let mut buffer = Vec::with_capacity(bytes as usize);
-                                    let res = reference.read_exact(&mut buffer);
-                                    match res {
-                                        Ok(_) => {
-                                            self.stack.push(Value::Bytes(buffer));
-                                        }
-                                        Err(e) => {
-                                            if self.is_catching {
-                                                self.stack.push(Value::Error(format!(
-                                                    "Error reading {} bytes from file handle: {}", bytes, e
-                                                )));
-                                            } else {
-                                                return Err(format!(
-                                                    "Error reading {} bytes from file handle: {}", bytes, e
-                                                ));
-                                            }
-                                        }
-                                    }
-                                }
-                                Some(_) => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Tried to read from a non-File handle object"
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "Tried to read from a non-File handle object"
-                                        ));
-                                    }
-                                }
-                                None => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "The self.stack is empty (at reading from self.stack file handle)"
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "The self.stack is empty (at reading from self.stack file handle)"
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Expected a int for reading the file handle"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Expected a int for reading the file handle"
-                                ));
-                            }
-                        }
-                        None => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The self.stack is empty (at reading from self.stack file handle)"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The self.stack is empty (at reading from self.stack file handle)"
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::PushFileHandlePointerStack => {
-                    match self.stack.pop() {
-                        Some(Value::String(name)) => {
-                            let indexof = self.file_handles_names.binary_search(&name);
-                            match indexof {
-                                Ok(index) => {
-                                    let (handle, is_writeable) = self.file_handles.get_mut(index).unwrap();
-                                    self.stack.push(Value::FileHandle((NonNull::new(handle).unwrap(), *is_writeable)));
-                                }
-                                Err(_) => {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "The file handle for `{}` is not opened.", name
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "The file handle for `{}` is not opened.", name
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                        Some(_) => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "Expected a string for closening the file handle"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "Expected a string for closening the file handle"
-                                ));
-                            }
-                        }
-                        None => {
-                            if self.is_catching {
-                                self.stack.push(Value::Error(format!(
-                                    "The self.stack is empty (at pushing file handle to the self.stack by its name)"
-                                )));
-                            } else {
-                                return Err(format!(
-                                    "The self.stack is empty (at pushing file handle to the self.stack by its name)"
-                                ));
-                            }
-                        }
-                    }
-                }
-                Instruction::AllocArgsToLocal => {
-                    if let Some(args) = self.args_to_alloc.pop() {
-                        for (name, value) in args {
-                            self.allocate_variable(name, value);
-                        }
-                    } else {
-                        return Err(format!("No arguments to allocate"));
-                    }
-                }
-                Instruction::DefineCoroutine(name) => {
-                    let mut body: Vec<Instruction> = vec![];
-                    self.pc += 1;
-                    while let Some(instruction) = self.instructions.get(self.pc as usize) {
-                        match instruction {
-                            Instruction::EndCoroutine => {
-                                break;
-                            }
-                            Instruction::DefineCoroutine(_) => {
-                                return Err(format!(
-                                    "Definition of coroutine inside a coroutine is not allowed."
-                                ))
-                            }
-                            _ => {
-                                body.push(instruction.clone());
-                                self.pc += 1;
-                            }
-                        }
-                    }
-                    self.coroutines.insert(name.clone(), body);
-                }
-                Instruction::EndCoroutine => {
-                    return Err(format!("EndCoroutine is not a standalone instruction."));
-                }
-                Instruction::RunCoroutine(name) => {
-                    if let Some(instructions) = self.coroutines.get(name) {
-                        let mut copied_handle = self.thread_cloned();
-                        copied_handle.instructions = instructions.clone().into();
-                        let static_handle: &'static mut VirtualMachine = Box::leak(Box::new(copied_handle));
-                        let handle = std::thread::spawn(move || {
-                            static_handle.run()
-                        });
-                        self.running_coroutines.push(Some(handle));
-                        self.stack.push(Value::Future(self.running_coroutines.len() - 1))
-                    } else {
-                        return Err(format!("Cannot summon nonexistent coroutine `{}`", name));
-                    }
-                }
-                Instruction::AwaitCoroutineFutureStack => {
-                    match self.stack.pop() {
-                        Some(Value::Future(index)) => {
-                            let coroutine = std::mem::replace(&mut self.running_coroutines[index], None);
-
-                            if let Some(coroutine) = coroutine {
-                                // Wait for the thread to complete and return its result
-                                match coroutine.join() {
-                                    Ok(joined_res) => {
-
-                                        match joined_res {
-                                            Ok(value) => {
-                                                self.stack.push(value);
-                                            }
-                                            Err(err) => {
-                                                if self.is_catching {
-                                                    self.stack.push(Value::Error(err.to_string()));
-                                                } else {
-                                                    return Err(format!("{}", err));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(err) => {
-                                        return Err(format!("Failed to join coroutine to thread main: {:?}", err));
-                                    }
-                                }
-                            } else {
-                                return Err(format!("Awaiting the same Future more than one time is not allowed"));
-                            }
-                        }
-                        Some(value) => {
-                            return Err(format!("Awaiting a non-Future type like `{}` is not allowed", value_to_readable(&value)));
-                        }
-                        None => {
-                            return Err(format!("The stack is empty (could not grab Future from stack at awaiting)"));
-                        }
-                    }
-                }
             }
         }
         Ok(Value::None)
@@ -3408,7 +2335,7 @@ impl VirtualMachine {
         let mut trace = String::new();
         trace.push_str("Stack backtrace:\n");
 
-        match std::env::var("Q_self.stack_BACKTRACE_LIM") {
+        match std::env::var("Q_STACK_BACKTRACE_LIM") {
             Ok(value) => {
                 if value.to_lowercase() == String::from("full") {
                     let remaining_instructions = self.instructions.iter().skip(self.pc as usize);
@@ -3423,7 +2350,7 @@ impl VirtualMachine {
                     }
                 } else {
                     if let Err(err) = u64::from_str_radix(&value, 10) {
-                        println!("Warning: Invalid enviroment variable Q_self.stack_BACKTRACE_LIM value set: can be either a number or full\n\t--> Error parsing number: {}\n\t--> Using default value", err);
+                        println!("Warning: Invalid enviroment variable Q_STACK_BACKTRACE_LIM value set: can be either a number or full\n\t--> Error parsing number: {}\n\t--> Using default value", err);
                     }
                     let remaining_instructions = self.instructions.iter().skip(self.pc as usize).take(limit);
                     for instr in remaining_instructions {

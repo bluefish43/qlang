@@ -1,7 +1,7 @@
-use crate::vm::Value as VMValue; // Importing crate::vm::Value as VMValue
-use fxhash::FxHashMap;
 use std::collections::HashSet;
 use std::ptr::NonNull;
+use crate::vm::Value as VMValue; // Importing crate::vm::Value as VMValue
+use fxhash::FxHashMap;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Color {
@@ -15,7 +15,6 @@ pub struct GarbageCollector {
     marked: HashSet<NonNull<VMValue>>, // Using VMValue instead of crate::vm::Value
     scopes: Vec<HashSet<NonNull<VMValue>>>, // Using VMValue instead of crate::vm::Value
     roots: HashSet<NonNull<VMValue>>,
-    already_freed: HashSet<*mut u8>,
 }
 
 impl GarbageCollector {
@@ -25,12 +24,10 @@ impl GarbageCollector {
             marked: HashSet::new(),
             scopes: Vec::new(),
             roots: HashSet::new(),
-            already_freed: HashSet::new(),
         }
     }
 
-    pub fn allocate(&mut self, value: VMValue) -> NonNull<VMValue> {
-        // Using VMValue instead of crate::vm::Value
+    pub fn allocate(&mut self, value: VMValue) -> NonNull<VMValue> { // Using VMValue instead of crate::vm::Value
         let object = Box::new(value);
         let object_ptr = Box::into_raw(object) as *mut VMValue; // Using VMValue instead of crate::vm::Value
         let object_nonnull = NonNull::new(object_ptr).unwrap();
@@ -42,8 +39,7 @@ impl GarbageCollector {
         object_nonnull
     }
 
-    pub fn allocate_in_scope(&mut self, value: VMValue) -> NonNull<VMValue> {
-        // Using VMValue instead of crate::vm::Value
+    pub fn allocate_in_scope(&mut self, value: VMValue) -> NonNull<VMValue> { // Using VMValue instead of crate::vm::Value
         let object_ptr = self.allocate(value);
         if self.scopes.len() == 1 {
             self.roots.insert(object_ptr);
@@ -66,28 +62,9 @@ impl GarbageCollector {
         }
     }
 
-    pub fn collect(&mut self, variables: &mut FxHashMap<String, *const VMValue>) {
+    pub fn collect(&mut self) {
         let mut colors = FxHashMap::default();
         self.mark(&mut colors);
-
-        let mut to_remove = Vec::new();
-
-        for (var_name, var_ptr) in variables.iter_mut() {
-            let var_ptr_nonnull = NonNull::new(*var_ptr as *mut VMValue);
-            if let Some(ptr) = var_ptr_nonnull {
-                if !self.marked.contains(&ptr) {
-                    // Object is not marked, remove it from the map
-                    *var_ptr = std::ptr::null();
-                    to_remove.push(var_name.clone());
-                }
-            }
-        }
-
-        for name in to_remove {
-            variables.remove(&name);
-        }
-
-        self.sweep(&mut colors);
     }
 
     fn mark(&mut self, colors: &mut FxHashMap<NonNull<VMValue>, Color>) {
@@ -119,16 +96,11 @@ impl GarbageCollector {
         let object = unsafe { &mut *object_ptr.as_ptr() };
 
         match object {
-            VMValue::PtrWrapper(reference) => {
-                let reference_ptr = unsafe {
-                    reference
-                        .as_mut() as *mut crate::Value
-                };
-                let reference_ptr = unsafe { NonNull::new_unchecked(reference_ptr) };
+            VMValue::PtrWrapper(reference_ptr) => {
                 if let Some(color) = colors.get_mut(&reference_ptr) {
                     if *color == Color::White {
                         *color = Color::Gray;
-                        stack.push(reference_ptr);
+                        stack.push(*reference_ptr);
                     }
                 }
             }
@@ -148,7 +120,6 @@ impl GarbageCollector {
         }
     }
 
-    #[allow(unused)]
     fn is_root(&self, object_ptr: NonNull<VMValue>) -> bool {
         self.roots.contains(&object_ptr)
     }
@@ -173,11 +144,10 @@ impl GarbageCollector {
             self.create_block(block)
         }
     }
-
-    #[allow(unused)]
+    
     fn get_block(&mut self) -> &mut GcBlock {
         unsafe { &mut *self.find_or_create_block() }
-    }
+    }    
 
     fn create_block(&mut self, block: GcBlock) -> &mut GcBlock {
         self.push_last_mut(block)
@@ -195,31 +165,17 @@ impl GarbageCollector {
     fn dealloc(&mut self) {
         for block in &mut self.blocks {
             for &object_ptr in &block.objects {
-                if self.already_freed.contains(&(object_ptr.as_ptr() as *mut u8)) {
-                    continue;
-                } else {
-                    unsafe {
-                        eprintln!("Deallocating block (supposedly unnalocated variable) {:?}", object_ptr);
-                        self.already_freed.insert(object_ptr.as_ptr() as *mut u8);
-                        let _ = Box::from_raw(object_ptr.as_ptr());
-                    }
+                unsafe {
+                    let _ = Box::from_raw(object_ptr.as_ptr());
                 }
             }
         }
     }
+}
 
-    pub fn absorb(&mut self, other: &mut GarbageCollector) {
-        // Move the blocks from the other GarbageCollector
-        self.blocks.append(&mut other.blocks);
-
-        // Move the marked objects from the other GarbageCollector
-        self.marked.extend(other.marked.drain());
-
-        // Move the scopes from the other GarbageCollector
-        self.scopes.append(&mut other.scopes);
-
-        // Move the roots from the other GarbageCollector
-        self.roots.extend(other.roots.drain());
+impl Drop for GarbageCollector {
+    fn drop(&mut self) {
+        self.dealloc();
     }
 }
 

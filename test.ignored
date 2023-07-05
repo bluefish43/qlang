@@ -1,0 +1,55 @@
+namespace Main {
+    import system.time.Timer;
+    import system.time.SystemTime;
+    import system.collections.HashMap;
+    import system.io.stdout;
+    import system.io.stdout.write_bytes;
+    import fmt.printf;
+    import system.args.unwrap_args;
+    import system.future.Future;
+    import system.range;
+
+    interface Person [
+        name: string;
+        age: int;
+    ]
+
+    #!allow yield
+    coroutine MyCoroutine {
+        for i in range(0, 10) {
+            printfln("{}", i);
+        }
+        yield None;
+        yield 1;
+    }
+
+    macro printfln {
+        (format, <args>(arg,)*, arg?) -> {
+            printf(format.to_string() + "\n", unwrap_args(args));
+        }
+    }
+
+    classmethod Person.talk(person: Person, what: any) {
+        println!(person.name + " with age " + person.age + ": " + what.to_string());
+    }
+
+    fun main() {
+        let mytime := Timer.new();
+        let age: int = 0;
+        let mymap: HashSet<SystemTime> = HashMap.new();
+        loop {
+            if mytime.seconds() == 13 {
+                println("Hello, world!", age);
+                break;
+            }
+            mymap.insert(mytime.now());
+        }
+        let cor: Future<Output = None> = MyCoroutine.spawn();
+        let result := Future.await(cor);
+        printfln("{}", cor);
+        cor.resume();
+        let result2 = Future.await(cor);
+        printfln("{}", cor);
+        return 0;
+    }
+}
