@@ -53,3 +53,22 @@ namespace Main {
         return 0;
     }
 }
+
+try {
+    throw "Hiii"
+} catch err {
+    throw err
+}
+
+coroutine MyCoroutine {
+    throw "This error was thrown"
+}
+
+fun main() {
+    let thread: Future = Coroutine.spawn(MyCoroutine);
+    try {
+        let result := Coroutine.await(thread);
+    } catch error {
+        throw error
+    }
+}

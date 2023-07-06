@@ -71,27 +71,6 @@ pub fn read_instruction<R: Read>(r: &mut R) -> std::io::Result<Instruction> {
         34 => Ok(Instruction::Invoke(read_string(r)?)),
         35 => Ok(Instruction::ToArgsStack),
         36 => Ok(Instruction::Return),
-        37 => Ok(Instruction::GetClassProperty(
-            read_string(r)?,
-            read_string(r)?,
-        )),
-        38 => Ok(Instruction::InvokeClassMethod(
-            read_string(r)?,
-            read_string(r)?,
-        )),
-        39 => Ok(Instruction::SetClassProperty(
-            read_string(r)?,
-            read_string(r)?,
-            read_value(r)?,
-        )),
-        40 => Ok(Instruction::ClassHasProperty(
-            read_string(r)?,
-            read_string(r)?,
-        )),
-        41 => Ok(Instruction::ClassHasStaticMethod(
-            read_string(r)?,
-            read_string(r)?,
-        )),
         42 => Ok(Instruction::HaltFromStack),
         43 => Ok(Instruction::StartFunction(
             read_string(r)?,
@@ -115,7 +94,28 @@ pub fn read_instruction<R: Read>(r: &mut R) -> std::io::Result<Instruction> {
         59 => Ok(Instruction::HasRefSameLoc),
         60 => Ok(Instruction::RefDifferenceInLoc),
         61 => Ok(Instruction::Typeof),
-        62 => Ok(Instruction::IsInstanceof(read_string(r)?)),
+        63 => Ok(Instruction::ThrowErrorStack),
+        64 => Ok(Instruction::GetReadFileHandle(read_string(r)?)),
+        65 => Ok(Instruction::GetWriteFileHandle(read_string(r)?)),
+        66 => Ok(Instruction::CloseFileHandle(read_string(r)?)),
+        67 => Ok(Instruction::PushFileHandlePointer(read_string(r)?)),
+        68 => Ok(Instruction::ReadFileHandleToString),
+        69 => Ok(Instruction::ReadFileHandleToBytes),
+        70 => Ok(Instruction::WriteStringToFileHandle),
+        71 => Ok(Instruction::WriteBytesToFileHandle),
+        72 => Ok(Instruction::SequestrateVariables),
+        73 => Ok(Instruction::RestoreSequestratedVariables),
+        74 => Ok(Instruction::GetReadFileHandleStack),
+        75 => Ok(Instruction::GetWriteFileHandleStack),
+        76 => Ok(Instruction::CloseFileHandleStack),
+        77 => Ok(Instruction::GetReadFileHandleStack),
+        78 => Ok(Instruction::PushFileHandlePointerStack),
+        79 => Ok(Instruction::AllocArgsToLocal),
+        80 => Ok(Instruction::DefineCoroutine(read_string(r)?)),
+        81 => Ok(Instruction::EndCoroutine),
+        82 => Ok(Instruction::RunCoroutine(read_string(r)?)),
+        83 => Ok(Instruction::AwaitCoroutineFutureStack),
+        84 => Ok(Instruction::ReadFromFileHandle(read_u32(r)?)),
         _ => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Invalid instruction tag: {:?}", tag[0]),
@@ -149,6 +149,12 @@ pub fn read_string<R: Read>(r: &mut R) -> std::io::Result<String> {
     Ok(string)
 }
 
+pub fn read_u32<R: Read>(r: &mut R) -> std::io::Result<u32> {
+    let mut num_buf = [0u8; size_of::<u32>()];
+    r.read_exact(&mut num_buf)?;
+    Ok(u32::from_le_bytes(num_buf))
+}
+
 pub fn read_list<R: Read>(r: &mut R) -> std::io::Result<Vec<Value>> {
     let mut len_buf = [0u8; size_of::<u32>()];
     r.read_exact(&mut len_buf)?;
@@ -165,24 +171,6 @@ pub fn read_value<R: Read>(r: &mut R) -> std::io::Result<Value> {
     r.read_exact(&mut tag)?;
     match tag {
         [0] => return Ok(Value::None),
-        [1] => {
-            let mut buffer = [0; size_of::<u32>()];
-            r.read_exact(&mut buffer)?;
-            let len = u32::from_le_bytes(buffer) as usize;
-            let mut class_name_buf = vec![0u8; len];
-            r.read_exact(&mut class_name_buf)?;
-            let class_name = String::from_utf8(class_name_buf)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-
-            let static_methods = read_static_methods(r)?;
-            let properties = read_properties(r)?;
-
-            Ok(Value::Class(Class {
-                name: class_name,
-                staticmethods: static_methods,
-                properties: properties,
-            }))
-        }
         [2] => {
             let mut buffer = [0; size_of::<i32>()];
             r.read_exact(&mut buffer)?;
@@ -244,7 +232,6 @@ pub fn read_type<R: Read>(r: &mut R) -> std::io::Result<Types> {
     r.read_exact(&mut tag)?;
     match tag {
         [0] => return Ok(Types::None),
-        [1] => return Ok(Types::Class),
         [2] => return Ok(Types::Int),
         [3] => return Ok(Types::BigInt),
         [4] => return Ok(Types::Float),

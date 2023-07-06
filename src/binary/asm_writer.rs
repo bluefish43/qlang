@@ -91,32 +91,6 @@ pub fn write_instruction<W: Write>(w: &mut W, instruction: Instruction) -> std::
         }
         Instruction::ToArgsStack => w.write_all(&[35])?,
         Instruction::Return => w.write_all(&[36])?,
-        Instruction::GetClassProperty(classname, name) => {
-            w.write_all(&[37])?;
-            write_string(w, classname)?;
-            write_string(w, name)?;
-        }
-        Instruction::InvokeClassMethod(classname, name) => {
-            w.write_all(&[38])?;
-            write_string(w, classname)?;
-            write_string(w, name)?;
-        }
-        Instruction::SetClassProperty(classname, name, val) => {
-            w.write_all(&[39])?;
-            write_string(w, classname)?;
-            write_string(w, name)?;
-            write_value(w, val)?;
-        }
-        Instruction::ClassHasProperty(classname, name) => {
-            w.write_all(&[40])?;
-            write_string(w, classname)?;
-            write_string(w, name)?;
-        }
-        Instruction::ClassHasStaticMethod(classname, name) => {
-            w.write_all(&[41])?;
-            write_string(w, classname)?;
-            write_string(w, name)?;
-        }
         Instruction::HaltFromStack => w.write_all(&[42])?,
         Instruction::StartFunction(name, params, returns) => {
             w.write_all(&[43])?;
@@ -178,12 +152,78 @@ pub fn write_instruction<W: Write>(w: &mut W, instruction: Instruction) -> std::
         Instruction::Typeof => {
             w.write_all(&[61])?;
         }
-        Instruction::IsInstanceof(t) => {
-            w.write_all(&[62])?;
-            write_string(w, t)?;
+        Instruction::ThrowErrorStack => {
+            w.write_all(&[63])?;
         }
-        _ => {
-            unimplemented!()
+        Instruction::GetReadFileHandle(name) => {
+            w.write_all(&[64])?;
+            write_string(w, name)?;
+        }
+        Instruction::GetWriteFileHandle(name) => {
+            w.write_all(&[65])?;
+            write_string(w, name)?;
+        }
+        Instruction::CloseFileHandle(name) => {
+            w.write_all(&[66])?;
+            write_string(w, name)?;
+        }
+        Instruction::PushFileHandlePointer(name) => {
+            w.write_all(&[67])?;
+            write_string(w, name)?;
+        }
+        Instruction::ReadFileHandleToString => {
+            w.write_all(&[68])?;
+        }
+        Instruction::ReadFileHandleToBytes => {
+            w.write_all(&[69])?;
+        }
+        Instruction::WriteStringToFileHandle => {
+            w.write_all(&[70])?;
+        }
+        Instruction::WriteBytesToFileHandle => {
+            w.write_all(&[71])?;
+        }
+        Instruction::SequestrateVariables => {
+            w.write_all(&[72])?;
+        }
+        Instruction::RestoreSequestratedVariables => {
+            w.write_all(&[73])?;
+        }
+        Instruction::GetReadFileHandleStack => {
+            w.write_all(&[74])?;
+        }
+        Instruction::GetWriteFileHandleStack => {
+            w.write_all(&[75])?;
+        }
+        Instruction::CloseFileHandleStack => {
+            w.write_all(&[76])?;
+        }
+        Instruction::ReadFromFileHandleStack => {
+            w.write_all(&[77])?;
+        }
+        Instruction::PushFileHandlePointerStack => {
+            w.write_all(&[78])?;
+        }
+        Instruction::AllocArgsToLocal => {
+            w.write_all(&[79])?;
+        }
+        Instruction::DefineCoroutine(name) => {
+            w.write_all(&[80])?;
+            write_string(w, name)?;
+        }
+        Instruction::EndCoroutine => {
+            w.write_all(&[81])?;
+        }
+        Instruction::RunCoroutine(name) => {
+            w.write_all(&[82])?;
+            write_string(w, name)?;
+        }
+        Instruction::AwaitCoroutineFutureStack => {
+            w.write_all(&[83])?;
+        }
+        Instruction::ReadFromFileHandle(name) => {
+            w.write_all(&[84])?;
+            w.write_all(&name.to_le_bytes())?;
         }
     }
     Ok(())
@@ -199,11 +239,6 @@ pub fn write_string<W: Write>(w: &mut W, s: String) -> std::io::Result<()> {
 pub fn write_value<W: Write>(w: &mut W, v: Value) -> std::io::Result<()> {
     match v {
         Value::None => w.write_all(&[0])?,
-        Value::Class(c) => {
-            write_string(w, c.name)?;
-            write_static_methods(w, c.staticmethods)?;
-            write_properties(w, c.properties)?;
-        }
         Value::Int(i) => {
             w.write_all(&[2])?;
             w.write_all(&i.to_le_bytes())?;
@@ -315,9 +350,6 @@ pub fn write_parameter_list<W: Write>(
 pub fn write_type<W: Write>(w: &mut W, v: Types) -> std::io::Result<()> {
     match v {
         Types::None => w.write_all(&[0])?,
-        Types::Class => {
-            w.write_all(&[1])?;
-        }
         Types::Int => {
             w.write_all(&[2])?;
         }

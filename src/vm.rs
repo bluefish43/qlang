@@ -11,11 +11,11 @@ use std::{
     io::{stderr, stdin, stdout, Write, Read},
     sync::Arc,
     path::PathBuf,
+    time::Instant,
     fs::{canonicalize, File},
     os::raw::{c_int, c_long, c_double, c_float, c_char}, ffi::{CString, CStr}, ptr::NonNull,
 };
 use ansi_term::Colour::{Blue, Green, White, Yellow};
-use async_std::task;
 
 fn colorize_string(input: &str) -> String {
     let mut result = String::new();
@@ -84,7 +84,6 @@ fn underline_filename_line_column<'a>(s: String) -> ANSIGenericString<'a, str> {
 #[derive(Clone, PartialEq)]
 pub enum Value {
     None,
-    Class(Class),
     Int(i32),
     BigInt(i64),
     Float(f64),
@@ -99,7 +98,7 @@ pub enum Value {
     PtrWrapper(NonNull<Value>),
     FileHandle((NonNull<File>, bool)),
     Bytes(Vec<u8>),
-    Future(usize),
+    Future(u32),
 }
 
 unsafe impl Send for Value {}
@@ -108,7 +107,6 @@ unsafe impl Sync for Value {}
 #[derive(Clone, PartialEq, Debug)]
 pub enum Types {
     None,
-    Class,
     Int,
     BigInt,
     Float,
@@ -141,7 +139,6 @@ pub fn value_to_readable(val: &Value) -> String {
         Value::Uninitialized => "Uninitialized".to_string(),
         Value::Boolean(_) => "boolean".to_string(),
         Value::Error(_) => "Error".to_string(),
-        Value::Class(p) => format!("<class Type at {:?}>", p as *const Class),
         Value::PtrWrapper(ptr) => format!("{:#?}", ptr),
         Value::FileHandle(f) => format!("<file>"),
         Value::Bytes(b) => format!("{:?}", b),
@@ -163,7 +160,6 @@ pub fn value_to_typeof(val: &Value) -> String {
         Value::Uninitialized => "uninitialized".to_string(),
         Value::Boolean(_) => "boolean".to_string(),
         Value::Error(_) => "error".to_string(),
-        Value::Class(_) => format!("class"),
         Value::PtrWrapper(_) => format!("ptr"),
         Value::FileHandle(f) => format!("File"),
         Value::Bytes(b) => format!("Bytes"),
@@ -185,7 +181,6 @@ pub fn typeof_to_string(val: &Types) -> String {
         Types::Uninitialized => "uninitialized".to_string(),
         Types::Boolean => "boolean".to_string(),
         Types::Error => "error".to_string(),
-        Types::Class => format!("class"),
         Types::PtrWrapper => format!("ptr"),
         Types::FileHandle => format!("File"),
         Types::Bytes => format!("Bytes"),
@@ -214,7 +209,6 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Uninitialized => "<Uninitialized>".to_string(),
         Value::Boolean(b) => b.to_string(),
         Value::Error(e) => format!("Error: {}", e),
-        Value::Class(p) => format!("<class Type at {:?}>", p as *const Class),
         Value::PtrWrapper(ptr) => {
             format!("{:#?}", ptr)
         }
@@ -244,7 +238,6 @@ pub fn value_to_debug(val: &Value) -> String {
         Value::Uninitialized => "<Uninitialized>".to_string(),
         Value::Boolean(b) => b.to_string(),
         Value::Error(e) => format!("\"Error: {}\"", e),
-        Value::Class(p) => format!("<class Type at {:?}>", p as *const Class),
         Value::PtrWrapper(ptr) => {
             format!("{:#?}", ptr)
         }
@@ -358,11 +351,6 @@ pub enum Instruction {
     Invoke(String), // invokes a function
     ToArgsStack,    // pops a value from the self.stack and pushes it onto the args self.stack
     Return,
-    GetClassProperty(String, String), // from class X gets property Y.
-    InvokeClassMethod(String, String), // calls a method from a class.
-    SetClassProperty(String, String, Value), // at class X sets property Y to value Z.
-    ClassHasProperty(String, String), // class X contains key Y
-    ClassHasStaticMethod(String, String), // class X contains method Y
     HaltFromStack,
     StartFunction(String, Vec<(String, Types)>, Types),
     EndFunction,
@@ -381,13 +369,12 @@ pub enum Instruction {
     HasRefSameLoc,
     RefDifferenceInLoc,
     Typeof,
-    IsInstanceof(String),
 
     GetReadFileHandle(String),
     GetWriteFileHandle(String),
     CloseFileHandle(String),
     PushFileHandlePointer(String),
-    ReadFromFileHandle(usize),
+    ReadFromFileHandle(u32),
     ReadFileHandleToString,
     ReadFileHandleToBytes,
     WriteStringToFileHandle,
@@ -406,6 +393,8 @@ pub enum Instruction {
     EndCoroutine,
     RunCoroutine(String),
     AwaitCoroutineFutureStack,
+
+    ThrowErrorStack,
 }
 
 pub struct VirtualMachine {
@@ -430,8 +419,8 @@ pub struct VirtualMachine {
     sequestrated_variables: Vec<FxHashMap<String, *const Value>>,
 
     last_runned: String,
-    recursive_level: usize,
-    max_recursiveness_level: usize,
+    recursive_level: u32,
+    max_recursiveness_level: u32,
     handles_recursion_count: bool,
     stack_before: Vec<Value>,
     expected_return_types: Vec<Types>,
@@ -444,7 +433,7 @@ unsafe impl Send for VirtualMachine {}
 unsafe impl Sync for VirtualMachine {}
 
 impl VirtualMachine {
-    pub fn new(mut instructions: Vec<Instruction>, filepath: &String, max_recursiveness_level: usize,
+    pub fn new(mut instructions: Vec<Instruction>, filepath: &String, max_recursiveness_level: u32,
         handles_recursion_count: bool) -> Result<Self, String> {
         instructions.push(Instruction::HaltFromStack);
         let mut includeds = Vec::new();
@@ -578,11 +567,11 @@ impl VirtualMachine {
         self.gc.collect();
     }
 
-    pub fn check_labels_from_pc(&mut self, length: usize) {
+    pub fn check_labels_from_pc(&mut self, length: u32) {
         let mut pos = self.pc;
         for instruction in self.instructions.iter().skip(self.pc as usize - 1) {
             pos += 1;
-            if pos as usize >= length {
+            if pos as u32 >= length {
                 break;
             }
             match instruction {
@@ -595,10 +584,20 @@ impl VirtualMachine {
         }
     }
 
-    pub fn run(&mut self) -> Result<Value, String> {
+    pub fn run(&mut self, timeout: Option<u128>) -> Result<Value, String> {
         self.gc.enter_scope();
+        let mut has_timeout = false;
+        if let Some(_) = timeout {
+            has_timeout = true;
+        }
+        let mut timed = Instant::now();
         while self.pc < (self.instructions.len() - 1).try_into().unwrap() {
             self.pc += 1;
+            if has_timeout {
+                if timed.elapsed().as_millis() >= timeout.unwrap() {
+                    return Err(format!("Timeout exceeded: ran for {}ms", timed.elapsed().as_millis()))
+                }
+            }
             match &self.instructions[self.pc as usize] {
                 Instruction::Declare(name, value) => {
                     if self.variables.contains_key(name) {
@@ -1960,7 +1959,7 @@ impl VirtualMachine {
                                         new_args.insert(varname, value);
                                     }
                                     self.args_to_alloc.push(new_args);
-                                    self.check_labels_from_pc(self.pc as usize);
+                                    self.check_labels_from_pc(self.pc as u32);
                                 }
                             }
                             _ => {
@@ -2037,221 +2036,6 @@ impl VirtualMachine {
                         }
                     }
                 }
-                Instruction::GetClassProperty(classname, property) => {
-                    if !self.variables.contains_key(classname) {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(format!(
-                                "Cannot use undefined variable {}",
-                                classname
-                            )));
-                        } else {
-                            return Err(format!("Cannot use undefined variable {}", classname));
-                        }
-                    } else {
-                        let class = self.variables.get(classname).unwrap();
-                        match unsafe { std::ptr::read_volatile(*class) } {
-                            Value::Class(class) => {
-                                if !class.properties.contains_key(property) {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "Class {} doesn't have property {}",
-                                            class.name, property
-                                        )));
-                                    } else {
-                                        return Err(format!(
-                                            "Class {} doesn't have property {}",
-                                            class.name, property
-                                        ));
-                                    }
-                                } else {
-                                    self.stack
-                                        .push(class.properties.get(property).unwrap().clone());
-                                }
-                            }
-                            _ => {
-                                if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
-                                        "{} is not a class",
-                                        classname
-                                    )));
-                                } else {
-                                    return Err(format!("{} is not a class", classname));
-                                }
-                            }
-                        }
-                    }
-                }
-                Instruction::InvokeClassMethod(classname, name) => {
-                    if !self.variables.contains_key(classname) {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(format!(
-                                "Cannot use undefined variable {}",
-                                classname
-                            )));
-                        } else {
-                            return Err(format!("Cannot use undefined variable {}", classname));
-                        }
-                    } else {
-                        let class = self.variables.get(classname).unwrap();
-                        match unsafe { std::ptr::read_volatile(*class) } {
-                            Value::Class(class) => {
-                                if !class.staticmethods.contains_key(name) {
-                                    if self.is_catching {
-                                        self.stack.push(Value::Error(format!(
-                                            "{} is not a class",
-                                            classname
-                                        )));
-                                    } else {
-                                        return Err(format!("{} is not a class", classname));
-                                    }
-                                }
-                                let func = class.staticmethods.get(name).unwrap();
-                                match func {
-                                    Function::Native(fun) => {
-                                        let mut args: Vec<Value> = vec![];
-                                        for _ in 0..(self.args_stack.len() as i64) - 1 {
-                                            args.push(self.stack.pop().unwrap());
-                                        }
-                                        let result = fun(args.as_slice());
-                                        match result {
-                                            Value::Error(e) => {
-                                                if self.is_catching {
-                                                    self.stack.push(Value::Error(e));
-                                                } else {
-                                                    return Err(e);
-                                                }
-                                            }
-                                            _ => {
-                                                self.stack.push(result);
-                                            }
-                                        }
-                                    }
-                                    Function::Interpreted(fun) => {
-                                        let mut args: Vec<Value> = vec![];
-                                        for _ in 0..fun.args.len() - 1 {
-                                            args.push(self.args_stack.pop_front().unwrap());
-                                        }
-                                        let typechecks = type_check_value(args, fun.args.clone());
-                                        if let Err(err) = typechecks {
-                                            if self.is_catching {
-                                                self.stack.push(Value::Error(err));
-                                            } else {
-                                                return Err(err);
-                                            }
-                                        } else {
-                                            self.returns_to.push(self.pc + 1);
-                                            let fun_body_len = fun.body.len();
-                                            self.instructions
-                                                .drain(self.pc as usize..(self.pc as usize + 1));
-                                            self.instructions.extend(fun.body.iter().cloned());
-                                            self.block_len = fun_body_len as i64;
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {
-                                if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
-                                        "{} is not a class",
-                                        classname
-                                    )));
-                                } else {
-                                    return Err(format!("{} is not a class", classname));
-                                }
-                            }
-                        }
-                    }
-                }
-                Instruction::SetClassProperty(classname, name, val) => {
-                    if !self.variables.contains_key(classname) {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(format!(
-                                "Cannot use undefined variable {}",
-                                classname
-                            )));
-                        } else {
-                            return Err(format!("Cannot use undefined variable {}", classname));
-                        }
-                    } else {
-                        let class = self.variables.get(classname).unwrap();
-                        match unsafe { std::ptr::read_volatile(*class) } {
-                            Value::Class(mut class) => {
-                                class.properties.insert(name.to_string(), val.clone());
-                            }
-                            _ => {
-                                if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
-                                        "{} is not a class",
-                                        classname
-                                    )));
-                                } else {
-                                    return Err(format!("{} is not a class", classname));
-                                }
-                            }
-                        }
-                    }
-                }
-                Instruction::ClassHasProperty(classname, property) => {
-                    if !self.variables.contains_key(classname) {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(format!(
-                                "Cannot use undefined variable {}",
-                                classname
-                            )));
-                        } else {
-                            return Err(format!("Cannot use undefined variable {}", classname));
-                        }
-                    } else {
-                        let class = self.variables.get_mut(classname).unwrap();
-                        match unsafe { std::ptr::read_volatile(*class) } {
-                            Value::Class(class) => {
-                                self.stack
-                                    .push(Value::Boolean(class.properties.contains_key(property)));
-                            }
-                            _ => {
-                                if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
-                                        "{} is not a class",
-                                        classname
-                                    )));
-                                } else {
-                                    return Err(format!("{} is not a class", classname));
-                                }
-                            }
-                        }
-                    }
-                }
-                Instruction::ClassHasStaticMethod(classname, staticmethod) => {
-                    if !self.variables.contains_key(classname) {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(format!(
-                                "Cannot use undefined variable {}",
-                                classname
-                            )));
-                        } else {
-                            return Err(format!("Cannot use undefined variable {}", classname));
-                        }
-                    } else {
-                        let class = self.variables.get_mut(classname).unwrap();
-                        match unsafe { std::ptr::read_volatile(*class) } {
-                            Value::Class(class) => {
-                                self.stack.push(Value::Boolean(
-                                    class.staticmethods.contains_key(staticmethod),
-                                ));
-                            }
-                            _ => {
-                                if self.is_catching {
-                                    self.stack.push(Value::Error(format!(
-                                        "{} is not a class",
-                                        classname
-                                    )));
-                                } else {
-                                    return Err(format!("{} is not a class", classname));
-                                }
-                            }
-                        }
-                    }
-                }
                 Instruction::HaltFromStack => {
                     let val = self.stack.pop();
                     match val {
@@ -2261,6 +2045,7 @@ impl VirtualMachine {
                 }
                 Instruction::StartFunction(name, args, return_type) => {
                     let mut body: Vec<Instruction> = vec![];
+                    body.push(Instruction::AllocArgsToLocal);
                     self.pc += 1;
                     while let Some(instruction) = self.instructions.get(self.pc as usize) {
                         match instruction {
@@ -2322,7 +2107,7 @@ impl VirtualMachine {
                         } else if let Ok(ins) = instructions {
                             let mut new_runtime_proto = VirtualMachine::new(ins, path, self.max_recursiveness_level, self.handles_recursion_count)?;
                             new_runtime_proto.check_labels();
-                            new_runtime_proto.run()?;
+                            new_runtime_proto.run(timeout)?;
                             self.functions.extend(new_runtime_proto.functions.into_iter());
                             self.variables.extend(new_runtime_proto.variables.clone().into_iter());
                             self.classes.extend(new_runtime_proto.classes.into_iter());
@@ -2606,32 +2391,6 @@ impl VirtualMachine {
                         }
                     }
                 }
-                Instruction::IsInstanceof(name) => {
-                    if let Some(val) = self.stack.pop() {
-                        if let Value::Class(c) = val {
-                            if &c.name == name {
-                                self.stack.push(Value::Class(c));
-                                self.stack.push(Value::Boolean(true));
-                            } else {
-                                self.stack.push(Value::Class(c));
-                                self.stack.push(Value::Boolean(false));
-                            }
-                        } else {
-                            self.stack.push(val);
-                            self.stack.push(Value::Boolean(false));
-                        }
-                    } else {
-                        if self.is_catching {
-                            self.stack.push(Value::Error(
-                                "Couldn't apply isinstanceof operator: The self.stack is empty".to_string(),
-                            ))
-                        } else {
-                            return Err(
-                                "Couldn't apply isinstanceof operator: The self.stack is empty".to_string(),
-                            );
-                        }
-                    }
-                }
                 Instruction::GetReadFileHandle(name) => {
                     let res = File::open(name);
                     match res {
@@ -2722,7 +2481,7 @@ impl VirtualMachine {
                     match self.stack.pop() {
                         Some(Value::FileHandle((handle, _))) => {
                             let reference = unsafe { handle.as_ptr().as_mut().unwrap() };
-                            let mut buffer = Vec::with_capacity(*bytes);
+                            let mut buffer = Vec::with_capacity(*bytes as usize);
                             let res = reference.read_exact(&mut buffer);
                             match res {
                                 Ok(_) => {
@@ -3352,10 +3111,10 @@ impl VirtualMachine {
                         copied_handle.instructions = instructions.clone().into();
                         let static_handle: &'static mut VirtualMachine = Box::leak(Box::new(copied_handle));
                         let handle = std::thread::spawn(move || {
-                            static_handle.run()
+                            static_handle.run(timeout)
                         });
                         self.running_coroutines.push(Some(handle));
-                        self.stack.push(Value::Future(self.running_coroutines.len() - 1))
+                        self.stack.push(Value::Future((self.running_coroutines.len() - 1) as u32))
                     } else {
                         return Err(format!("Cannot summon nonexistent coroutine `{}`", name));
                     }
@@ -3363,7 +3122,7 @@ impl VirtualMachine {
                 Instruction::AwaitCoroutineFutureStack => {
                     match self.stack.pop() {
                         Some(Value::Future(index)) => {
-                            let coroutine = std::mem::replace(&mut self.running_coroutines[index], None);
+                            let coroutine = std::mem::replace(&mut self.running_coroutines[index as usize], None);
 
                             if let Some(coroutine) = coroutine {
                                 // Wait for the thread to complete and return its result
@@ -3399,12 +3158,40 @@ impl VirtualMachine {
                         }
                     }
                 }
+                Instruction::ThrowErrorStack => {
+                    match self.stack.pop() {
+                        Some(err) => {
+                            if self.is_catching {
+                                match err {
+                                    Value::Error(err) => {
+                                        self.stack.push(Value::Error(err.to_string()))
+                                    }
+                                    _ => {
+                                        self.stack.push(Value::Error(err.to_string()))
+                                    }
+                                }
+                            } else {
+                                match err {
+                                    Value::Error(err) => {
+                                        return Err(err.to_string())
+                                    }
+                                    _ => {
+                                        return Err(err.to_string());
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            return Err(format!("An error occurred during the handling of another error: The stack is empty (tried to throw an error from the stack)"));
+                        }
+                    }
+                }
             }
         }
         Ok(Value::None)
     }
 
-    pub fn get_opstack_backtrace(&self, mut limit: usize) -> String {
+    pub fn get_opstack_backtrace(&self, mut limit: u32) -> String {
         let mut trace = String::new();
         trace.push_str("Stack backtrace:\n");
 
@@ -3416,8 +3203,8 @@ impl VirtualMachine {
                         trace.push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
                     }
                 } else if let Ok(lim) = u64::from_str_radix(&value, 10) {
-                    limit = lim as usize;
-                    let remaining_instructions = self.instructions.iter().skip(self.pc as usize).take(limit);
+                    limit = lim as u32;
+                    let remaining_instructions = self.instructions.iter().skip(self.pc as usize).take(limit as usize);
                     for instr in remaining_instructions {
                         trace.push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
                     }
@@ -3425,14 +3212,14 @@ impl VirtualMachine {
                     if let Err(err) = u64::from_str_radix(&value, 10) {
                         println!("Warning: Invalid enviroment variable Q_self.stack_BACKTRACE_LIM value set: can be either a number or full\n\t--> Error parsing number: {}\n\t--> Using default value", err);
                     }
-                    let remaining_instructions = self.instructions.iter().skip(self.pc as usize).take(limit);
+                    let remaining_instructions = self.instructions.iter().skip(self.pc as usize).take(limit as usize);
                     for instr in remaining_instructions {
                         trace.push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
                     }
                 }
             }
             _ => {
-                let remaining_instructions = self.instructions.iter().skip(self.pc as usize).take(limit);
+                let remaining_instructions = self.instructions.iter().skip(self.pc as usize).take(limit as usize);
                 for instr in remaining_instructions {
                     trace.push_str(&format!("\t{}\n", colorize_string(&format!("{:?}", instr))));
                 }

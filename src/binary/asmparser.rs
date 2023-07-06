@@ -153,32 +153,6 @@ impl Parser {
                     "ret" => {
                         instructions.push(Instruction::Return);
                     },
-                    "getcp" => {
-                        let class = self.parse_identifier()?;
-                        let property = self.parse_identifier()?;
-                        instructions.push(Instruction::GetClassProperty(class, property));
-                    },
-                    "ivkcm" => {
-                        let class = self.parse_identifier()?;
-                        let method = self.parse_identifier()?;
-                        instructions.push(Instruction::InvokeClassMethod(class, method));
-                    },
-                    "setcp" => {
-                        let class = self.parse_identifier()?;
-                        let property = self.parse_identifier()?;
-                        let value = self.parse_value()?;
-                        instructions.push(Instruction::SetClassProperty(class, property, value));
-                    },
-                    "chasp" => {
-                        let class = self.parse_identifier()?;
-                        let property = self.parse_identifier()?;
-                        instructions.push(Instruction::ClassHasProperty(class, property));
-                    },
-                    "chassm" => {
-                        let class = self.parse_identifier()?;
-                        let method = self.parse_identifier()?;
-                        instructions.push(Instruction::ClassHasStaticMethod(class, method));
-                    },
                     "hlt" => {
                         instructions.push(Instruction::HaltFromStack);
                     },
@@ -243,10 +217,6 @@ impl Parser {
                     "tpof" => {
                         instructions.push(Instruction::Typeof)
                     }
-                    "iiof" => {
-                        let of = self.parse_identifier()?;
-                        instructions.push(Instruction::IsInstanceof(of))
-                    }
                     "grfh" => {
                         let path = self.parse_string()?;
                         instructions.push(Instruction::GetReadFileHandle(path))
@@ -256,7 +226,69 @@ impl Parser {
                         instructions.push(Instruction::GetWriteFileHandle(path))
                     }
                     "cfh" => {
-
+                        let path = self.parse_string()?;
+                        instructions.push(Instruction::CloseFileHandle(path))
+                    }
+                    "pfhp" => {
+                        let path = self.parse_string()?;
+                        instructions.push(Instruction::PushFileHandlePointer(path))
+                    }
+                    "rffh" => {
+                        let path = self.parse_int()? as u32;
+                        instructions.push(Instruction::ReadFromFileHandle(path))
+                    }
+                    "rfhts" => {
+                        instructions.push(Instruction::ReadFileHandleToString)
+                    }
+                    "rfhtb" => {
+                        instructions.push(Instruction::ReadFileHandleToBytes)
+                    }
+                    "wstfh" => {
+                        instructions.push(Instruction::WriteStringToFileHandle)
+                    }
+                    "wbtfh" => {
+                        instructions.push(Instruction::WriteBytesToFileHandle)
+                    }
+                    "sv" => {
+                        instructions.push(Instruction::SequestrateVariables)
+                    }
+                    "rsv" => {
+                        instructions.push(Instruction::RestoreSequestratedVariables)
+                    }
+                    "grfhs" => {
+                        instructions.push(Instruction::GetReadFileHandleStack)
+                    }
+                    "gwfhs" => {
+                        instructions.push(Instruction::GetWriteFileHandleStack)
+                    }
+                    "cfhs" => {
+                        instructions.push(Instruction::CloseFileHandleStack)
+                    }
+                    "rffhs" => {
+                        instructions.push(Instruction::ReadFromFileHandleStack)
+                    }
+                    "pfhps" => {
+                        instructions.push(Instruction::PushFileHandlePointerStack)
+                    }
+                    "alatl" => {
+                        instructions.push(Instruction::AllocArgsToLocal)
+                    }
+                    "dfcor" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::DefineCoroutine(name))
+                    }
+                    "ecor" => {
+                        instructions.push(Instruction::EndCoroutine)
+                    }
+                    "rcor" => {
+                        let name = self.parse_identifier()?;
+                        instructions.push(Instruction::RunCoroutine(name))
+                    }
+                    "awtcorfs" => {
+                        instructions.push(Instruction::AwaitCoroutineFutureStack)
+                    }
+                    "throwstk" => {
+                        instructions.push(Instruction::ThrowErrorStack);
                     }
                     _ => return Err(format!("{}:{}->{}: Invalid keyword '{}'", ctoken.line, ctoken.column, ctoken.length + ctoken.column, kw)),
                 },
@@ -295,10 +327,6 @@ impl Parser {
             match &ctoken.token_type {
                 TokenType::Type(kw) => match kw.as_str() {
                     "None" => Ok(Value::None),
-                    "class" => {
-                        let class = self.parse_class()?;
-                        Ok(Value::Class(class))
-                    },
                     "int" => {
                         let value = self.parse_int()?;
                         Ok(Value::Int(value))
@@ -519,9 +547,6 @@ impl Parser {
                     match ttype.as_str() {
                         "None" => {
                             Ok(Types::None)
-                        }
-                        "class" => {
-                            Ok(Types::Class)
                         }
                         "int" => {
                             Ok(Types::Int)

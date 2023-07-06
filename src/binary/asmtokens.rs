@@ -51,7 +51,7 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                         "entscp", "lvvscp", "clct", "asref", "hrefsm", "refdlc", "tpof", "iiof",
                         "grfh", "gwfh", "cfh", "pfhp", "rffh", "rfhts", "rfhtb", "wstfh", "wbtfh",
                         "sv", "rsv", "grfhs", "gwfhs", "cfhs", "rffhs", "pfhps", "alatl", "dfcor",
-                        "ecor", "rcor", "awtcorfs"
+                        "ecor", "rcor", "awtcorfs", "throwstk"
                         ].contains(&identifier.as_str()) {
                             tokens_stream.push(Token {
                                 token_type: TokenType::Keyword(identifier),

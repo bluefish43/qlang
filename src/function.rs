@@ -6,6 +6,24 @@ use std::sync::Arc;
 
 use crate::vm::{value_to_readable, value_to_string, Instruction, Types, Value};
 
+use std::ops::{Mul, Sub, Add};
+
+fn factorial<T>(n: T) -> T
+where
+    T: std::ops::Mul<Output = T>
+        + std::ops::Sub<Output = T>
+        + std::ops::Add<Output = T>
+        + From<u16>
+        + Clone
+        + std::cmp::PartialOrd,
+{
+    if n.clone() <= T::from(1u16) {
+        T::from(1u16)
+    } else {
+        n.clone() * factorial(n.clone() - T::from(1u16))
+    }
+}
+
 #[derive(Clone)]
 pub enum Function {
     Native(Arc<dyn Fn(&[Value]) -> Value>),
@@ -1929,6 +1947,23 @@ pub fn get_math() -> Vec<(String, Function)> {
             match &args[0] {
                 Value::Float(f) => Value::Float(f.round()),
                 Value::LFloat(f) => Value::LFloat(f.round()),
+                _ => Value::Error(String::from("round requires a numeric argument")),
+            }
+        })),
+    ));
+
+    natives.push((
+        String::from("factorial"),
+        Function::Native(Arc::new(|args| {
+            if args.len() != 1 {
+                return Value::Error(String::from("factorial requires exactly one argument"));
+            }
+
+            match &args[0] {
+                Value::Float(f) => Value::Float(factorial(*f)),
+                Value::LFloat(f) => Value::LFloat(factorial(*f)),
+                Value::BigInt(i) => Value::BigInt(factorial(*i)),
+                Value::Int(i) => Value::Int(factorial(*i)),
                 _ => Value::Error(String::from("round requires a numeric argument")),
             }
         })),

@@ -4,9 +4,14 @@ use binary::asm::read_instructions;
 use binary::asm_writer::write_instructions;
 use binary::asmparser::Parser;
 use binary::asmtokens::tokenize;
+use qo::parser::Parser as QOParser;
+use qo::tokenizer::Tokenizer;
+use qo::tokens::Token as QOToken;
+use qo::tokens::TokenKind as QOTokenKind;
 use vm::{VirtualMachine};
 use ansi_term::Color;
 
+use crate::qo::converter::convert;
 use crate::vm::{Instruction, Value};
 
 pub mod class;
@@ -17,13 +22,29 @@ pub mod vm;
 pub mod binary;
 pub mod memory;
 pub mod manifest;
+pub mod qo;
 
+use core::panic;
 use std::collections::VecDeque;
 use std::env::args;
 use std::fs::File;
 use std::io::Read;
 use std::process::exit;
 use std::sync::Arc;
+use std::time::Instant;
+
+macro_rules! error_println {
+    ($($args:expr),*) => {
+        println!("{} {}", Color::Red.bold().paint("Error:"), format_args!($($args),*))
+    };
+}
+
+macro_rules! note_println {
+    ($($args:expr),*) => {
+        println!("{} {}", Color::White.bold().paint("Note:"), format_args!($($args),*))
+    };
+}
+
 
 fn usage(program_name: &str) {
     println!(
@@ -45,18 +66,23 @@ ARGS:
 }
 
 pub fn main() {
+    let mut instant = Instant::now();
     let mut option = String::new();
     let mut input = String::new();
     let mut debug = false;
     let mut output = String::new();
     let mut libraries_to_load_with_fns: Vec<(String, Vec<String>)> = Vec::new();
     let mut stack_backtrace_limit = 7;
-    let program_name = "qlang";
+    let program_name = "qvm";
+    let mut timeout: Option<u128> = None;
+    let mut timed = false;
+    let mut nanos = false;
+    let mut millis = false;
 
     let mut args = args().skip(1);
 
     if args.len() < 1 {
-        println!("Error: Minimum number of arguments is 1");
+        error_println!("Minimum number of arguments is 1");
         usage(program_name);
         exit(1);
     }
@@ -64,118 +90,143 @@ pub fn main() {
         let next_arg = args.next();
         match next_arg {
             Some(arg) => match arg.as_str() {
-                "-d" | "--debug" => {
+                "-d" => {
                     if debug == true {
-                        println!("Error: -d | --debug can only be used once");
+                        error_println!("-d can only be used once");
+                        note_println!("each option can only be used once");
                         exit(1)
                     }
                     debug = true;
                 }
-                "-i" | "--input" => match args.next() {
+                "-i" => match args.next() {
                     Some(arg) => {
                         if input.as_str() != "" {
-                            println!("Error: -i | --input can only be used once");
+                            error_println!("-i can only be used once");
+                            note_println!("each option can only be used once");
                             exit(1)
                         }
                         input = arg;
                     }
                     None => {
-                        println!("Error: -i | --input requires an argument");
+                        error_println!("-i requires an argument");
+                        note_println!("provide an argument like -i /path/to/file");
                         exit(1)
                     }
                 },
-                "-o" | "--output" => match args.next() {
+                "-o" => match args.next() {
                     Some(arg) => {
                         if output.as_str() != "" {
-                            println!("Error: -o | --output can only be used once");
+                            error_println!("-o can only be used once");
+                            note_println!("each option can only be used once");
                             exit(1)
                         }
                         output = arg;
                     }
                     None => {
-                        println!("Error: -o | --output requires an argument");
+                        error_println!("-o requires an argument");
+                        note_println!("provide an argument like -i /path/to/file");
                         exit(1)
                     }
                 }
                 "run" => {
                     if option != String::new() {
-                        println!("Error: The main option can only be used once");
+                        error_println!("The main option can only be used once");
                         exit(1)
                     }
                     option = arg;
                 }
                 "build" => {
                     if option != String::new() {
-                        println!("Error: The main option can only be used once");
-                        exit(1)
-                    }
-                    option = arg;
-                }
-                "writetest" => {
-                    if option != String::new() {
-                        println!("Error: The main option can only be used once");
-                        exit(1)
-                    }
-                    option = arg;
-                }
-                "runtest" => {
-                    if option != String::new() {
-                        println!("Error: The main option can only be used once");
+                        error_println!("The main option can only be used once");
                         exit(1)
                     }
                     option = arg;
                 }
                 "--stack-backtrace-lim" => {
                     if stack_backtrace_limit != 7 {
-                        println!("Error: The --stack-backtrace-lim option can only be used once");
+                        error_println!("The --stack-backtrace-lim option can only be used once");
                         exit(1)
                     } else {
                         match args.next() {
                             Some(arg) => {
                                 let parsed_u32 = arg.parse::<u32>();
                                 if parsed_u32.is_err() {
-                                    println!("Error: --stack-backtrace-lim requires a positive numeric argument");
+                                    error_println!("--stack-backtrace-lim requires a positive numeric argument");
+                                    note_println!("provide something like --stack-backtrace-lim 60000");
                                     exit(1)
                                 } else {
                                     stack_backtrace_limit = parsed_u32.unwrap();
                                 }
                             }
                             None => {
-                                println!("Error: --stack-backtrace-lim requires an argument");
+                                error_println!("--stack-backtrace-lim requires an argument");
+                                note_println!("provide something like --stack-backtrace-lim 60000");
                                 exit(1)
                             }
                         }
                     }
                 }
-                "-e" | "--extern" => {
-                    let library_name = args.next();
-                    if let None = library_name {
-                        println!("Error: -e | --extern requires a library to load");
+                "--timed" => {
+                    if timed {
+                        error_println!("--timed already defined");
+                        note_println!("each option can only be used once");
                         exit(1)
                     }
-                    let library_name = library_name.unwrap();
-                    let mut funcnames: Vec<String> = Vec::new();
-                    loop {
-                        match args.next() {
-                            Some(arg) => match arg.as_str() {
-                                "--end" => {
-                                    libraries_to_load_with_fns.push((library_name, funcnames));
-                                    break;
-                                }
-                                _ => {
-                                    funcnames.push(arg);
-                                }
-                            },
-                            None => {
-                                println!("Error: Unclosed -e | --extern parameters");
+                    timed = true;
+                }
+                "--nanos" => {
+                    if millis || nanos {
+                        error_println!("a {} is already defined", if millis { "--millis" } else { "--nanos" });
+                        exit(1)
+                    }
+                    nanos = true;
+                }
+                "--millis" => {
+                    if millis || nanos {
+                        error_println!("a {} is already defined", if millis { "--millis" } else { "--nanos" });
+                        exit(1)
+                    }
+                    millis = true;
+                }
+                "--timeout" => {
+                    match args.next() {
+                        Some(arg) => {
+                            let parsed_u32 = arg.parse::<u128>();
+                            if parsed_u32.is_err() {
+                                error_println!("--timeout requires a positive numeric argument");
+
                                 exit(1)
+                            } else {
+                                timeout = Some(parsed_u32.unwrap());
                             }
                         }
+                        None => {
+                            error_println!("--timeout requires an argument");
+                            exit(1)
+                        }
+                    }
+                }
+                "qotest" => match args.next() {
+                    Some(arg) => {
+                        if option.as_str() != "" {
+                            error_println!("main option can only be used once");
+                            note_println!("each option can only be used once");
+                            exit(1)
+                        }
+                        option = String::from("qotest");
+                        input = arg;
+                    }
+                    None => {
+                        panic!()
                     }
                 }
                 _ => {
-                    println!("Error: Unknown command line option: {}", arg);
-                    exit(1)
+                    if &input != "" {
+                        error_println!("input is already defined: assumed `{}` to be an input file as its not a recognized argument", input);
+                        usage(program_name);
+                    } else {
+                        input = arg;
+                    }
                 }
             },
             None => break,
@@ -183,12 +234,13 @@ pub fn main() {
     }
     if option == String::from("run") {
         if !std::path::Path::new(&input).exists() {
-            println!("The file '{}' does not exist.", input);
+            error_println!("The file '{}' does not exist.", input);
+            note_println!("provide a file that exists in your machine");
             exit(1)
         }
         let file = std::fs::File::open(&input);
         if let Err(error) = file {
-            println!("Error: Could not open file: {}", error);
+            error_println!("Could not open file: {}", error);
             exit(1)
         }
         let mut file = file.unwrap();
@@ -196,39 +248,53 @@ pub fn main() {
         if let Ok(instructions) = instructions {
             let mut runtime = VirtualMachine::new(instructions.clone(), &input, 10000, true).expect("Couldn't create a virtual machine instance correctly.");
             runtime.check_labels();
-            let result = runtime.run();
+            let result = runtime.run(timeout);
             match result {
                 Ok(result) => {
-                    println!("{}", vm::value_to_string(&result));
+                    println!("\n{}", vm::value_to_string(&result));
+                    if timed && nanos {
+                        println!("{}ns elapsed", instant.elapsed().as_nanos());
+                    } else if timed {
+                        println!("{}ms elapsed", instant.elapsed().as_millis());
+                    }
                     exit(0)
                 }
                 Err(err) => {
-                    println!("{}: {}", Color::Red.bold().paint("Error"), Color::White.bold().paint(err));
+                    error_println!("{}", Color::White.bold().paint(err));
                     println!(
                         "{}",
-                        runtime.get_opstack_backtrace(stack_backtrace_limit as usize)
+                        runtime.get_opstack_backtrace(stack_backtrace_limit as u32)
                     );
+                    if timed {
+                        if nanos {
+                            println!("\n{}ns elapsed", instant.elapsed().as_nanos());
+                        } else {
+                            println!("\n{}ms elapsed", instant.elapsed().as_millis());
+                        }
+                    }
                     exit(1)
                 }
             }
         } else if let Err(err) = instructions {
-            println!("Error: Could not read binary file: {}", err);
+            error_println!("Could not read binary file: {}", err);
+            note_println!("make sure the file provided is a valid executable");
             exit(1)
         }
     } else if option == String::from("build") {
         if !std::path::Path::new(&input).exists() {
-            println!("The file '{}' does not exist.", input);
+            error_println!("The file '{}' does not exist.", input);
+            note_println!("provide a file that exists in your machine");
             exit(1)
         }
         let file = std::fs::File::open(&input);
         if let Err(error) = file {
-            println!("Error: Could not open file: {}", error);
+            error_println!("Could not open file: {}", error);
             exit(1)
         }
         let mut file = file.unwrap();
         let mut buffer = String::new();
         if let Err(err) = file.read_to_string(&mut buffer) {
-            println!("Error: Could not read file: {}", err);
+            error_println!("Could not read file: {}", err);
             exit(1);
         }
         let tokens = tokenize(&buffer, &input);
@@ -245,7 +311,8 @@ pub fn main() {
         }
         let instructions = instructions.unwrap();
         if output == String::new() {
-            println!("Error: Output file not specified");
+            error_println!("Output file not specified");
+            note_println!("provide an argument like -o /path/to/file");
             usage(program_name);
             exit(1);
         }
@@ -253,13 +320,29 @@ pub fn main() {
         if let Ok(mut file) = res {
             let result = write_instructions(&mut file, instructions);
             if let Err(err) = result {
-                println!("Error: Could not write instructions to output file: {}", err);
+                error_println!("Could not write instructions to output file: {}", err);
                 exit(1);
             }
         } else if let Err(err) = res {
-            println!("Error: Could not create output file: {}", err);
+            error_println!("Could not create output file: {}", err);
             exit(1);
         }
+    } else if option == String::from("qotest") {
+        eprintln!("getting here");
+        let mut file = File::open(input).unwrap();
+        let mut buffer = String::new();
+        file.read_to_string(&mut buffer).unwrap();
+        let mut tokenizer = Tokenizer::new(buffer);
+        let tokens: Vec<QOToken> = tokenizer.tokenize().unwrap();
+        eprintln!("{:?}", tokens);
+        let mut parser = QOParser::new(&tokens);
+        let parsed = parser.parse().unwrap();
+        eprintln!("{:?}", parsed);
+        let converted = convert(parsed);
+        eprintln!("Converted:\n{}", converted);
+    } else {
+        eprintln!("Unknown option: {}", option);
+        exit(1)
     }
 }
 
