@@ -12,6 +12,7 @@ use vm::{VirtualMachine};
 use ansi_term::Color;
 
 use crate::qo::converter::convert;
+use crate::qo::parser::format_error;
 use crate::vm::{Instruction, Value};
 
 pub mod class;
@@ -45,6 +46,14 @@ macro_rules! note_println {
     };
 }
 
+macro_rules! example_println {
+    ($($args:expr),*) => {
+        let input = format!($($args),*);
+        let lines: Vec<String> = input.lines().map(|line| format!("+ {}", ansi_term::Color::Green.paint(line))).collect();
+        let output = lines.join("\n");
+        println!("{}", output);
+    };
+}
 
 fn usage(program_name: &str) {
     println!(
@@ -332,14 +341,36 @@ pub fn main() {
         let mut file = File::open(input).unwrap();
         let mut buffer = String::new();
         file.read_to_string(&mut buffer).unwrap();
-        let mut tokenizer = Tokenizer::new(buffer);
+        let mut tokenizer = Tokenizer::new(buffer.clone());
         let tokens: Vec<QOToken> = tokenizer.tokenize().unwrap();
         eprintln!("{:?}", tokens);
         let mut parser = QOParser::new(&tokens);
-        let parsed = parser.parse().unwrap();
-        eprintln!("{:?}", parsed);
-        let converted = convert(parsed);
-        eprintln!("Converted:\n{}", converted);
+        let parsed = parser.parse();
+        if let Err((msg, tok)) = parsed {
+            if let Some(token) = tok {
+                let fmt = format_error(&buffer, Color::White.bold().paint(&msg[0]).to_string().as_str(), token);
+                error_println!("{}", fmt);
+                if msg.len() > 1 {
+                    note_println!("{}", msg[1]);
+                }
+                if msg.len() >= 2 {
+                    example_println!("{}", msg[2]);
+                }
+            } else {
+                error_println!("{}", msg[0]);
+                if msg.len() > 1 {
+                    note_println!("{}", msg[1]);
+                }
+                if msg.len() >= 2 {
+                    example_println!("{}", msg[2]);
+                }
+            }
+            exit(1)
+        } else if let Ok(parsed) = parsed {
+            eprintln!("{:?}", parsed);
+            let converted = convert(parsed);
+            eprintln!("Converted:\n{}", converted);
+        }
     } else {
         eprintln!("Unknown option: {}", option);
         exit(1)

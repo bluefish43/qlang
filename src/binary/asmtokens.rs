@@ -33,7 +33,7 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                         while let Some(c) = iterator.next() {
                             if c.is_whitespace() {
                                 break;
-                            } else if c.is_alphanumeric() || c == '_' {
+                            } else if c.is_alphanumeric() || c == '_' || c == '.' {
                                 identifier.push(c);
                             } else {
                                 break;
@@ -47,7 +47,7 @@ pub fn tokenize(input: &str, filename: &str) -> Result<Vec<Token>, String> {
                         "mod", "pow", "and", "or", "xor", "not", "eq", "ne", "gt", "lt",
                         "gte", "lte", "cth", "ecth", "istd", "incl", "ivk", "tastk", "ret",
                         "getcp", "ivkcm", "setcp", "chasp", "chassm", "hlt", "fdef", "fendef",
-                        "dup", "lst", "lnd", "inln", "dbgpstk", "escp", "lscp", "clct", "memrvol", "memwvol",
+                        "dup", "lst", "math.lnd", "inln", "dbgpstk", "escp", "lscp", "clct", "memrvol", "memwvol",
                         "entscp", "lvvscp", "clct", "asref", "hrefsm", "refdlc", "tpof", "iiof",
                         "grfh", "gwfh", "cfh", "pfhp", "rffh", "rfhts", "rfhtb", "wstfh", "wbtfh",
                         "sv", "rsv", "grfhs", "gwfhs", "cfhs", "rffhs", "pfhps", "alatl", "dfcor",

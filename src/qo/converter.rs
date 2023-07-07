@@ -7,10 +7,13 @@ pub fn convert(statements: Vec<Statement>) -> String {
         match statement {
             Statement::Assignment(a, b) | Statement::LetDeclaration(a, b) => {
                 convert_expr(&mut out, b);
-                out.push_str(&format!("pop {}", a));
+                out.push_str(&format!("pop {}\n", a));
             }
             Statement::Conditional(a, b) => {
                 unimplemented!("conditionals are not yet implemented");
+            }
+            Statement::Expr(e) => {
+                convert_expr(&mut out, e);
             }
         }
     }
@@ -20,7 +23,7 @@ pub fn convert(statements: Vec<Statement>) -> String {
 pub fn convert_expr(s: &mut String, expr: Expression) {
     match expr {
         Expression::Variable(v) => {
-            s.push_str(&format!("ld {}", v));
+            s.push_str(&format!("ld {}\n", v));
         }
         Expression::Numerical(n) => {
             convert_math(s, n);
@@ -35,18 +38,31 @@ pub fn convert_expr(s: &mut String, expr: Expression) {
         Expression::Literal(l) => {
             match l {
                 TokenKind::StringLiteral(l) => {
-                    s.push_str(&format!("push string {:?}", l));
+                    s.push_str(&format!("push string {:?}\n", l));
                 }
                 TokenKind::BoolLiteral(b) => {
-                    s.push_str(&format!("push bool {:?}", b));
+                    s.push_str(&format!("push bool {:?}\n", b));
                 }
                 TokenKind::NoneLiteral => {
-                    s.push_str(&format!("push None"));
+                    s.push_str(&format!("push None\n"));
                 }
                 _ => {
                     unreachable!("literal handling in converter.rs")
                 }
             }
+        }
+        Expression::List(l) => {
+            eprintln!("l");
+            s.push_str(&format!("ivk list.new\n"));
+            s.push_str(&format!("asref\n"));
+            for expr in l {
+                s.push_str(&format!("dup\n"));
+                s.push_str(&format!("tastk\n"));
+                convert_expr(s, expr);
+                s.push_str(&format!("tastk\n"));
+                s.push_str("ivk list.push\n");
+            }
+            s.push_str(&format!("pop _\n"));
         }
     }
 }

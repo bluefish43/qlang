@@ -103,12 +103,6 @@ macro_rules! my_format {
                 _ => {
                     formatted_string = formatted_string.replace(&format!("{{.{}{}}}", $option, $param), value_str);
                 },
-            }#[derive(PartialEq, Debug, Clone)]
-            pub struct FunctionStruct {
-                pub name: String,
-                pub args: Vec<(String, Types)>,
-                pub returns: Types,
-                pub body: Vec<Instruction>,
             }
             
         )*
@@ -148,29 +142,33 @@ pub struct FunctionStruct {
 pub fn get_natives() -> Vec<(String, Function)> {
     let mut natives: Vec<(String, Function)> = Vec::new();
     natives.push((
-        String::from("print"),
+        String::from("fmt.print"),
         Function::Native(Arc::new(|args| {
             if args.is_empty() {
-                Value::Error(String::from("print requires at least one argument"))
+                Value::Error(String::from("fmt.print requires at least one argument"))
             } else {
-                print!("{}", value_to_string(&args[0]));
+                for arg in args {
+                    print!("{}", value_to_string(arg));
+                }
                 Value::None
             }
         })),
     ));
     natives.push((
-        String::from("println"),
+        String::from("fmt.println"),
         Function::Native(Arc::new(|args| {
             if args.is_empty() {
-                Value::Error(String::from("println requires at least one argument"))
+                Value::Error(String::from("fmt.println requires at least one argument"))
             } else {
-                println!("{}", value_to_string(&args[0]));
+                for arg in args {
+                    println!("{}", value_to_string(arg));
+                }
                 Value::None
             }
         })),
     ));
     natives.push((
-        String::from("read_line"),
+        String::from("io.read_line"),
         Function::Native(Arc::new(|_| {
             let mut input = String::new();
             let result = stdin().read_line(&mut input);
@@ -182,10 +180,16 @@ pub fn get_natives() -> Vec<(String, Function)> {
         })),
     ));
     natives.push((
-        String::from("concat"),
+        String::from("list.new"),
+        Function::Native(Arc::new(|_| {
+            Value::List(vec![])
+        })),
+    ));
+    natives.push((
+        String::from("concatenate"),
         Function::Native(Arc::new(|args| {
             if args.is_empty() {
-                Value::Error(String::from("concat requires at least one argument"))
+                Value::Error(String::from("concatenate requires at least one argument"))
             } else {
                 let mut result = String::new();
                 for val in args {
@@ -196,30 +200,30 @@ pub fn get_natives() -> Vec<(String, Function)> {
         })),
     ));
     natives.push((
-        String::from("to_upper"),
+        String::from("string.to_upper"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("to_upper requires exactly one argument"))
+                Value::Error(String::from("string.to_upper requires exactly one argument"))
             } else {
                 Value::String(value_to_string(&args[0]).to_uppercase())
             }
         })),
     ));
     natives.push((
-        String::from("to_lower"),
+        String::from("string.to_lower"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("to_lower requires exactly one argument"))
+                Value::Error(String::from("string.to_lower requires exactly one argument"))
             } else {
                 Value::String(value_to_string(&args[0]).to_lowercase())
             }
         })),
     ));
     natives.push((
-        String::from("is_numeric"),
+        String::from("string.is_numeric"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("is_numeric requires exactly one argument"))
+                Value::Error(String::from("string.is_numeric requires exactly one argument"))
             } else {
                 return Value::Boolean(
                     value_to_string(&args[0])
@@ -230,50 +234,50 @@ pub fn get_natives() -> Vec<(String, Function)> {
         })),
     ));
     natives.push((
-        String::from("is_upper"),
+        String::from("string.is_upper"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("is_upper requires exactly one argument"))
+                Value::Error(String::from("string.is_upper requires exactly one argument"))
             } else {
                 return Value::Boolean(value_to_string(&args[0]).chars().all(|c| c.is_uppercase()));
             }
         })),
     ));
     natives.push((
-        String::from("is_lower"),
+        String::from("string.is_lower"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("is_lower requires exactly one argument"))
+                Value::Error(String::from("string.is_lower requires exactly one argument"))
             } else {
                 return Value::Boolean(value_to_string(&args[0]).chars().all(|c| c.is_lowercase()));
             }
         })),
     ));
     natives.push((
-        String::from("str_is_empty"),
+        String::from("string.is_empty"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("is_empty requires exactly one argument"))
+                Value::Error(String::from("string.is_empty requires exactly one argument"))
             } else {
                 return Value::Boolean(value_to_string(&args[0]).is_empty());
             }
         })),
     ));
     natives.push((
-        String::from("trim"),
+        String::from("string.trim"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("is_empty requires exactly one argument"))
+                Value::Error(String::from("string.is_empty requires exactly one argument"))
             } else {
                 return Value::String(value_to_string(&args[0]).trim().to_string());
             }
         })),
     ));
     natives.push((
-        String::from("is_hex"),
+        String::from("string.is_hex"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("is_hex requires exactly one argument"))
+                Value::Error(String::from("string.is_hex requires exactly one argument"))
             } else {
                 return Value::Boolean(
                     value_to_string(&args[0])
@@ -284,30 +288,30 @@ pub fn get_natives() -> Vec<(String, Function)> {
         })),
     ));
     natives.push((
-        String::from("is_octal"),
+        String::from("string.is_octal"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("is_octal requires exactly one argument"))
+                Value::Error(String::from("string.is_octal requires exactly one argument"))
             } else {
                 return Value::Boolean(value_to_string(&args[0]).chars().all(|c| c.is_digit(8)));
             }
         })),
     ));
     natives.push((
-        String::from("is_binary"),
+        String::from("string.is_binary"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("is_binary requires exactly one argument"))
+                Value::Error(String::from("string.is_binary requires exactly one argument"))
             } else {
                 return Value::Boolean(value_to_string(&args[0]).chars().all(|c| c.is_digit(2)));
             }
         })),
     ));
     natives.push((
-        String::from("strlen"),
+        String::from("string.length"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("strlen requires exactly one argument"))
+                Value::Error(String::from("string.length requires exactly one argument"))
             } else {
                 Value::Int(value_to_string(&args[0]).len() as i32)
             }
@@ -315,78 +319,78 @@ pub fn get_natives() -> Vec<(String, Function)> {
     ));
     // count: Counts the number of occurrences of a substring within a string.
     natives.push((
-        String::from("count"),
+        String::from("string.count"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("count requires exactly two arguments"));
+                return Value::Error(String::from("string.count requires exactly two arguments"));
             }
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(sub)) => {
                     let count = s.matches(sub).count();
                     Value::Int(count as i32)
                 }
-                _ => Value::Error(String::from("count requires two string arguments")),
+                _ => Value::Error(String::from("string.count requires two string arguments")),
             }
         })),
     ));
 
     // starts_with: Checks if a string starts with a specific prefix.
     natives.push((
-        String::from("starts_with"),
+        String::from("string.starts_with"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("starts_with requires exactly two arguments"));
+                return Value::Error(String::from("string.starts_with requires exactly two arguments"));
             }
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(prefix)) => {
                     let starts_with = s.starts_with(prefix);
                     Value::Boolean(starts_with)
                 }
-                _ => Value::Error(String::from("starts_with requires two string arguments")),
+                _ => Value::Error(String::from("string.starts_with requires two string arguments")),
             }
         })),
     ));
 
     // ends_with: Checks if a string ends with a specific suffix.
     natives.push((
-        String::from("ends_with"),
+        String::from("string.ends_with"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("ends_with requires exactly two arguments"));
+                return Value::Error(String::from("string.ends_with requires exactly two arguments"));
             }
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(suffix)) => {
                     let ends_with = s.ends_with(suffix);
                     Value::Boolean(ends_with)
                 }
-                _ => Value::Error(String::from("ends_with requires two string arguments")),
+                _ => Value::Error(String::from("string.ends_with requires two string arguments")),
             }
         })),
     ));
 
     // replace: Replaces all occurrences of a substring within a string with another substring.
     natives.push((
-        String::from("replace"),
+        String::from("string.replace"),
         Function::Native(Arc::new(|args| {
             if args.len() != 3 {
-                return Value::Error(String::from("replace requires exactly three arguments"));
+                return Value::Error(String::from("string.replace requires exactly three arguments"));
             }
             match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::String(old), Value::String(new)) => {
                     let replaced = s.replace(old, new);
                     Value::String(replaced)
                 }
-                _ => Value::Error(String::from("replace requires three string arguments")),
+                _ => Value::Error(String::from("string.replace requires three string arguments")),
             }
         })),
     ));
 
     // substring: Retrieves a substring from a given string based on start and end indices.
     natives.push((
-        String::from("substring"),
+        String::from("string.substring"),
         Function::Native(Arc::new(|args| {
             if args.len() != 3 {
-                return Value::Error(String::from("substring requires exactly three arguments"));
+                return Value::Error(String::from("string.substring requires exactly three arguments"));
             }
             match (&args[0], &args[1], &args[2]) {
                 (Value::String(s), Value::Int(start), Value::Int(end)) => {
@@ -400,7 +404,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
                     }
                 }
                 _ => Value::Error(String::from(
-                    "substring requires a string and two integer arguments",
+                    "string.substring requires a string and two integer arguments",
                 )),
             }
         })),
@@ -408,10 +412,10 @@ pub fn get_natives() -> Vec<(String, Function)> {
 
     // join: Joins elements of a list into a single string using a delimiter.
     natives.push((
-        String::from("join"),
+        String::from("list.join"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("join requires exactly two arguments"));
+                return Value::Error(String::from("list.join requires exactly two arguments"));
             }
             match (&args[0], &args[1]) {
                 (Value::List(list), Value::String(delimiter)) => {
@@ -422,17 +426,17 @@ pub fn get_natives() -> Vec<(String, Function)> {
                         .join(delimiter);
                     Value::String(joined)
                 }
-                _ => Value::Error(String::from("join requires a list and a string argument")),
+                _ => Value::Error(String::from("list.join requires a list and a string argument")),
             }
         })),
     ));
 
     // split: Splits a string into a list of substrings based on a delimiter.
     natives.push((
-        String::from("split"),
+        String::from("string.split"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("split requires exactly two arguments"));
+                return Value::Error(String::from("string.split requires exactly two arguments"));
             }
             match (&args[0], &args[1]) {
                 (Value::String(s), Value::String(delimiter)) => {
@@ -443,17 +447,17 @@ pub fn get_natives() -> Vec<(String, Function)> {
                     Value::List(substrings)
                 }
                 _ => Value::Error(String::from(
-                    "split requires a string and a string delimiter",
+                    "string.split requires a string and a string delimiter",
                 )),
             }
         })),
     ));
 
     natives.push((
-        String::from("lines"),
+        String::from("string.lines"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("lines requires exactly one argument"));
+                return Value::Error(String::from("string.lines requires exactly one argument"));
             }
             match &args[0] {
                 Value::String(s) => {
@@ -463,68 +467,26 @@ pub fn get_natives() -> Vec<(String, Function)> {
                         .collect();
                     Value::List(substrings)
                 }
-                _ => Value::Error(String::from("lines requires a string")),
+                _ => Value::Error(String::from("string.lines requires a string")),
             }
         })),
     ));
 
     natives.push((
-        String::from("to_string"),
+        String::from("string.from"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("to_string requires exactly one argument"));
+                return Value::Error(String::from("string.from requires exactly one argument"));
             }
             Value::String(value_to_string(&args[0]))
         })),
     ));
 
     natives.push((
-        String::from("command"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 1 {
-                Value::Error(String::from("command requires exactly one argument"))
-            } else {
-                let binding = value_to_string(&args[0]);
-                let mut commands = binding.split(' ').collect::<Vec<&str>>();
-                let output = std::process::Command::new(commands.pop().unwrap())
-                    .args(commands)
-                    .spawn();
-                match output {
-                    Ok(mut child) => {
-                        let output = child.wait();
-                        match output {
-                            Ok(exitcode) => Value::Int(exitcode.code().unwrap()),
-                            Err(err) => Value::Error(err.to_string()),
-                        }
-                    }
-                    Err(err) => Value::Error(err.to_string()),
-                }
-            }
-        })),
-    ));
-    natives.push((
-        String::from("command_async"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 1 {
-                Value::Error(String::from("command requires exactly one argument"))
-            } else {
-                let binding = value_to_string(&args[0]);
-                let mut commands = binding.split(' ').collect::<Vec<&str>>();
-                let output = std::process::Command::new(commands.pop().unwrap())
-                    .args(commands)
-                    .spawn();
-                match output {
-                    Ok(_) => Value::None,
-                    Err(err) => Value::Error(err.to_string()),
-                }
-            }
-        })),
-    ));
-    natives.push((
-        String::from("readptr"),
+        String::from("pointer.read"),
         Function::Native(Arc::new(|args| {
             if args.len() < 1 {
-                Value::Error(String::from("readptr requires exactly one argument"))
+                Value::Error(String::from("pointer.read requires exactly one argument"))
             } else {
                 match &args[0] {
                     Value::PtrWrapper(ptr) => {
@@ -539,10 +501,10 @@ pub fn get_natives() -> Vec<(String, Function)> {
         })),
     ));
     natives.push((
-        String::from("writeptr"),
+        String::from("pointer.write"),
         Function::Native(Arc::new(|args| {
             if args.len() < 2 {
-                return Value::Error(String::from("writeptr requires exactly two arguments"))
+                return Value::Error(String::from("pointer.write requires exactly two arguments"))
             } else {
                 match &args[0] {
                     Value::PtrWrapper(ptr) => {
@@ -555,10 +517,10 @@ pub fn get_natives() -> Vec<(String, Function)> {
         })),
     ));
     natives.push((
-        String::from("copyptr"),
+        String::from("pointer.copy"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("copyptr requires exactly one argument"))
+                Value::Error(String::from("pointer.copy requires exactly one argument"))
             } else {
                 match &args[0] {
                     Value::PtrWrapper(ptr) => {
@@ -578,327 +540,21 @@ pub fn get_natives() -> Vec<(String, Function)> {
         })),
     ));
     natives.push((
-        String::from("as_ptr"),
+        String::from("pointer.from"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("asptr requires exactly one argument"))
+                Value::Error(String::from("pointer.from requires exactly one argument"))
             } else {
                 return Value::PtrWrapper(NonNull::new(&args[0] as *const Value as *mut Value).unwrap());
             }
         })),
     ));
-    natives.push((
-        String::from("ftruncate"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 2 {
-                Value::Error(String::from("ftruncate requires exactly two arguments"))
-            } else {
-                if std::path::Path::new(&value_to_string(&args[0])).exists() {
-                    let file = std::fs::File::open(&value_to_string(&args[0]));
-                    match file {
-                        Ok(file) => match &args[1] {
-                            Value::Int(size) => {
-                                if size < &1 {
-                                    return Value::Error(String::from(
-                                        "Size must be greater than 0",
-                                    ));
-                                }
-                                let res = file.set_len(*size as u64);
-                                if let Err(err) = res {
-                                    return Value::Error(format!(
-                                        "Could not truncate file: {}",
-                                        err
-                                    ));
-                                }
-                                return Value::None;
-                            }
-                            Value::BigInt(size) => {
-                                if size < &1 {
-                                    return Value::Error(String::from(
-                                        "Size must be greater than 0",
-                                    ));
-                                }
-                                let res = file.set_len(*size as u64);
-                                if let Err(err) = res {
-                                    return Value::Error(format!(
-                                        "Could not truncate file: {}",
-                                        err
-                                    ));
-                                }
-                                return Value::None;
-                            }
-                            _ => {
-                                return Value::Error(format!(
-                                    "{} is not a numeric type",
-                                    value_to_readable(&args[1])
-                                ))
-                            }
-                        },
-                        Err(err) => return Value::Error(format!("Could open file: {}", err)),
-                    }
-                } else {
-                    return Value::Error(format!(
-                        "File {} does not exist",
-                        value_to_string(&args[1])
-                    ));
-                }
-            }
-        })),
-    ));
 
     natives.push((
-        String::from("fread"),
+        String::from("process.exit"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("fread requires exactly one argument"))
-            } else {
-                if std::path::Path::new(&value_to_string(&args[0])).exists() {
-                    let file = std::fs::File::open(&value_to_string(&args[0]));
-                    match file {
-                        Ok(mut file) => {
-                            let mut buffer = String::new();
-                            let res = file.read_to_string(&mut buffer);
-                            if let Err(err) = res {
-                                return Value::Error(format!("Could not read from file: {}", err));
-                            }
-                            return Value::String(buffer);
-                        }
-                        Err(err) => return Value::Error(format!("Could not open file: {}", err)),
-                    }
-                } else {
-                    return Value::Error(format!(
-                        "File {} does not exist",
-                        value_to_string(&args[1])
-                    ));
-                }
-            }
-        })),
-    ));
-
-    natives.push((
-        String::from("fmove"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 2 {
-                Value::Error(String::from("move_file requires exactly two arguments"))
-            } else {
-                let from = value_to_string(&args[0]);
-                let to = value_to_string(&args[1]);
-                match std::fs::rename(from, to) {
-                    Ok(_) => Value::None,
-                    Err(err) => Value::Error(format!("Could not move file: {}", err)),
-                }
-            }
-        })),
-    ));
-
-    natives.push((
-        String::from("fcopy"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 2 {
-                Value::Error(String::from("copy_file requires exactly two arguments"))
-            } else {
-                let from = value_to_string(&args[0]);
-                let to = value_to_string(&args[1]);
-                match std::fs::copy(from, to) {
-                    Ok(_) => Value::None,
-                    Err(err) => Value::Error(format!("Could not copy file: {}", err)),
-                }
-            }
-        })),
-    ));
-
-    natives.push((
-        String::from("frename"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 2 {
-                Value::Error(String::from("rename_file requires exactly two arguments"))
-            } else {
-                let from = value_to_string(&args[0]);
-                let to = value_to_string(&args[1]);
-                match std::fs::rename(from, to) {
-                    Ok(_) => Value::None,
-                    Err(err) => Value::Error(format!("Could not rename file: {}", err)),
-                }
-            }
-        })),
-    ));
-
-    natives.push((
-        String::from("fexists"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 1 {
-                Value::Error(String::from("fexists requires exactly one argument"))
-            } else {
-                Value::Boolean(std::path::Path::new(&value_to_string(&args[0])).exists())
-            }
-        })),
-    ));
-
-    natives.push((
-        String::from("fis_directory"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 1 {
-                Value::Error(String::from("is_directory requires exactly one argument"))
-            } else {
-                if std::path::Path::new(&value_to_string(&args[0])).exists() {
-                    let file = std::fs::File::open(&value_to_string(&args[0]));
-                    match file {
-                        Ok(file) => {
-                            let metadata = file.metadata();
-                            if let Ok(metadata) = metadata {
-                                return Value::Boolean(metadata.is_dir());
-                            } else {
-                                return Value::Error(format!(
-                                    "Could not get metadata from file: {}",
-                                    metadata.err().unwrap()
-                                ));
-                            }
-                        }
-                        Err(err) => return Value::Error(format!("Could not open file: {}", err)),
-                    }
-                } else {
-                    return Value::Error(format!(
-                        "File {} does not exist",
-                        value_to_string(&args[1])
-                    ));
-                }
-            }
-        })),
-    ));
-
-    natives.push((
-        String::from("fis_symlink"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 1 {
-                Value::Error(String::from("is_symlink requires exactly one argument"))
-            } else {
-                if std::path::Path::new(&value_to_string(&args[0])).exists() {
-                    let file = std::fs::File::open(&value_to_string(&args[0]));
-                    match file {
-                        Ok(file) => {
-                            let metadata = file.metadata();
-                            if let Ok(metadata) = metadata {
-                                return Value::Boolean(metadata.is_symlink());
-                            } else {
-                                return Value::Error(format!(
-                                    "Could not get metadata from file: {}",
-                                    metadata.err().unwrap()
-                                ));
-                            }
-                        }
-                        Err(err) => return Value::Error(format!("Could not open file: {}", err)),
-                    }
-                } else {
-                    return Value::Error(format!(
-                        "File {} does not exist",
-                        value_to_string(&args[1])
-                    ));
-                }
-            }
-        })),
-    ));
-
-    natives.push((
-        String::from("fread_exact"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 2 {
-                Value::Error(String::from("fread_exact requires exactly two arguments"))
-            } else {
-                if std::path::Path::new(&value_to_string(&args[0])).exists() {
-                    let file = std::fs::File::open(&value_to_string(&args[0]));
-                    match file {
-                        Ok(mut file) => match &args[2] {
-                            Value::Int(size) => {
-                                if size < &1 {
-                                    return Value::Error(String::from(
-                                        "Size must be greater than 0",
-                                    ));
-                                }
-                                let mut buffer = Vec::with_capacity(*size as usize);
-                                let res = file.read_exact(&mut buffer);
-                                if let Err(err) = res {
-                                    return Value::Error(format!(
-                                        "Could not read from file: {}",
-                                        err
-                                    ));
-                                }
-                                return Value::String(
-                                    String::from_utf8_lossy(buffer.as_slice()).to_string(),
-                                );
-                            }
-                            Value::BigInt(size) => {
-                                if size < &1 {
-                                    return Value::Error(String::from(
-                                        "Size must be greater than 0",
-                                    ));
-                                }
-                                let mut buffer = Vec::with_capacity(*size as usize);
-                                let res = file.read_exact(&mut buffer);
-                                if let Err(err) = res {
-                                    return Value::Error(format!(
-                                        "Could not read from file: {}",
-                                        err
-                                    ));
-                                }
-                                return Value::String(
-                                    String::from_utf8_lossy(buffer.as_slice()).to_string(),
-                                );
-                            }
-                            _ => {
-                                return Value::Error(format!(
-                                    "{} is not a numeric type",
-                                    value_to_readable(&args[2])
-                                ))
-                            }
-                        },
-                        Err(err) => return Value::Error(format!("Could not open file: {}", err)),
-                    }
-                } else {
-                    return Value::Error(format!(
-                        "File {} does not exist",
-                        value_to_string(&args[1])
-                    ));
-                }
-            }
-        })),
-    ));
-    natives.push((
-        String::from("fwrite"),
-        Function::Native(Arc::new(|args| {
-            if args.len() < 2 {
-                Value::Error(String::from("fwrite requires at least two arguments"))
-            } else {
-                if std::path::Path::new(&value_to_string(&args[0])).exists() {
-                    let file = std::fs::File::open(&value_to_string(&args[0]));
-                    match file {
-                        Ok(mut file) => {
-                            let mut result = String::new();
-                            for arg in &args[1..] {
-                                result.push_str(&value_to_string(arg).as_str());
-                            }
-                            let res = file.write_all(result.as_bytes());
-                            if let Err(err) = res {
-                                return Value::Error(format!("Could not write to file: {}", err));
-                            }
-                            Value::None
-                        }
-                        Err(err) => return Value::Error(format!("Could not open file: {}", err)),
-                    }
-                } else {
-                    return Value::Error(format!(
-                        "File {} does not exist",
-                        value_to_string(&args[1])
-                    ));
-                }
-            }
-        })),
-    ));
-
-    natives.push((
-        String::from("exit"),
-        Function::Native(Arc::new(|args| {
-            if args.len() != 1 {
-                return Value::Error(String::from("exit requires exactly one argument"));
+                return Value::Error(String::from("process.exit requires exactly one argument"));
             }
 
             if let Value::Int(code) = &args[0] {
@@ -906,16 +562,16 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             Value::Error(String::from(
-                "arr_get takes a pointer and an integer as parameters",
+                "process.exit takes an integer as parameter",
             ))
         })),
     ));
 
     natives.push((
-        String::from("arr_get"),
+        String::from("list.get"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("arr_get requires exactly two arguments"));
+                return Value::Error(String::from("list.get requires exactly two arguments"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -945,10 +601,10 @@ pub fn get_natives() -> Vec<(String, Function)> {
     ));
 
     natives.push((
-        String::from("arr_push"),
+        String::from("list.push"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("arr_push requires exactly two arguments"));
+                return Value::Error(String::from("list.push requires exactly two arguments"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -973,10 +629,10 @@ pub fn get_natives() -> Vec<(String, Function)> {
     ));
 
     natives.push((
-        String::from("contains"),
+        String::from("list.contains"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("contains requires exactly two arguments"));
+                return Value::Error(String::from("list.contains requires exactly two arguments"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -989,21 +645,21 @@ pub fn get_natives() -> Vec<(String, Function)> {
                 }
 
                 return Value::Error(String::from(
-                    "contains takes a pointer to a list as the first parameter",
+                    "list.contains takes a pointer to a list as the first parameter",
                 ));
             }
 
             Value::Error(String::from(
-                "contains takes a pointer and a value as parameters",
+                "list.contains takes a pointer and a value as parameters",
             ))
         })),
     ));
 
     natives.push((
-        String::from("arr_insert"),
+        String::from("list.insert"),
         Function::Native(Arc::new(|args| {
             if args.len() != 3 {
-                return Value::Error(String::from("arr_insert requires exactly three arguments"));
+                return Value::Error(String::from("list.insert requires exactly three arguments"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -1023,21 +679,21 @@ pub fn get_natives() -> Vec<(String, Function)> {
                 }
 
                 return Value::Error(String::from(
-                    "arr_insert takes a pointer, an integer index, and a value as parameters",
+                    "list.insert takes a pointer, an integer index, and a value as parameters",
                 ));
             }
 
             Value::Error(String::from(
-                "arr_insert takes a pointer, an integer index, and a value as parameters",
+                "list.insert takes a pointer, an integer index, and a value as parameters",
             ))
         })),
     ));
 
     natives.push((
-        String::from("arr_len"),
+        String::from("list.length"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("arr_len requires exactly one argument"));
+                return Value::Error(String::from("list.length requires exactly one argument"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -1050,21 +706,21 @@ pub fn get_natives() -> Vec<(String, Function)> {
                 }
 
                 return Value::Error(String::from(
-                    "arr_len takes a pointer to a list as the parameter",
+                    "list.length takes a pointer to a list as the parameter",
                 ));
             }
 
             Value::Error(String::from(
-                "arr_len takes a pointer to a list as the parameter",
+                "list.length takes a pointer to a list as the parameter",
             ))
         })),
     ));
 
     natives.push((
-        String::from("arr_indexof"),
+        String::from("list.find"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("arr_indexof requires exactly two arguments"));
+                return Value::Error(String::from("list.find requires exactly two arguments"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -1082,21 +738,21 @@ pub fn get_natives() -> Vec<(String, Function)> {
                 }
 
                 return Value::Error(String::from(
-                    "arr_indexof takes a pointer to a list and a value as parameters",
+                    "list.find takes a pointer to a list and a value as parameters",
                 ));
             }
 
             Value::Error(String::from(
-                "arr_indexof takes a pointer to a list and a value as parameters",
+                "list.find takes a pointer to a list and a value as parameters",
             ))
         })),
     ));
 
     natives.push((
-        String::from("arr_first"),
+        String::from("list.first"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("arr_first requires exactly one argument"));
+                return Value::Error(String::from("list.first requires exactly one argument"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -1113,21 +769,21 @@ pub fn get_natives() -> Vec<(String, Function)> {
                 }
 
                 return Value::Error(String::from(
-                    "arr_first takes a pointer to a list as the parameter",
+                    "list.first takes a pointer to a list as the parameter",
                 ));
             }
 
             Value::Error(String::from(
-                "arr_first takes a pointer to a list as the parameter",
+                "list.first takes a pointer to a list as the parameter",
             ))
         })),
     ));
 
     natives.push((
-        String::from("arr_last"),
+        String::from("list.last"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("arr_last requires exactly one argument"));
+                return Value::Error(String::from("list.last requires exactly one argument"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -1143,12 +799,12 @@ pub fn get_natives() -> Vec<(String, Function)> {
                 }
 
                 return Value::Error(String::from(
-                    "arr_last takes a pointer to a list as the parameter",
+                    "list.last takes a pointer to a list as the parameter",
                 ));
             }
 
             Value::Error(String::from(
-                "arr_last takes a pointer to a list as the parameter",
+                "list.last takes a pointer to a list as the parameter",
             ))
         })),
     ));
@@ -1172,7 +828,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
                 }
 
                 return Value::Error(String::from(
-                    "arr_last takes a pointer to a list as the parameter",
+                    "reverse takes a pointer to a list as the parameter",
                 ));
             } else if let Value::String(string) = &args[0] {
                 let mut list_of_chars = string.chars().collect::<Vec<char>>();
@@ -1185,16 +841,16 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             Value::Error(String::from(
-                "arr_last takes a pointer to a list or a string as the parameter",
+                "reverse takes a pointer to a list or a string as the parameter",
             ))
         })),
     ));
 
     natives.push((
-        String::from("zip"),
+        String::from("list.zip"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("zip requires exactly one argument"));
+                return Value::Error(String::from("list.zip requires exactly one argument"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -1212,7 +868,7 @@ pub fn get_natives() -> Vec<(String, Function)> {
                             let mut new_list: Vec<Value> = vec![];
                             if elements.len() != elements2.len() {
                                 return Value::Error(String::from(
-                                    "To use zip, the length of the lists must be equal",
+                                    "To use list.zip, the length of the lists must be equal",
                                 ));
                             }
                             for (element1, element2) in elements
@@ -1227,13 +883,13 @@ pub fn get_natives() -> Vec<(String, Function)> {
                         }
 
                         return Value::Error(String::from(
-                            "zip takes a pointer to a list as the second parameter",
+                            "list.zip takes a pointer to a list as the second parameter",
                         ));
                     }
                 }
 
                 return Value::Error(String::from(
-                    "zip takes a pointer to a list as the first parameter",
+                    "list.zip takes a pointer to a list as the first parameter",
                 ));
             }
 
@@ -1244,10 +900,10 @@ pub fn get_natives() -> Vec<(String, Function)> {
     ));
 
     natives.push((
-        String::from("enumerate"),
+        String::from("list.enumerate"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("enumerate requires exactly one argument"));
+                return Value::Error(String::from("list.enumerate requires exactly one argument"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -1266,105 +922,21 @@ pub fn get_natives() -> Vec<(String, Function)> {
                 }
 
                 return Value::Error(String::from(
-                    "enumerate takes a pointer to a list as the first parameter",
+                    "list.enumerate takes a pointer to a list as the first parameter",
                 ));
             }
 
             Value::Error(String::from(
-                "enumerate takes a pointer to a list as the first parameter",
+                "list.enumerate takes a pointer to a list as the first parameter",
             ))
         })),
     ));
 
     natives.push((
-        String::from("max"),
-        Function::Native(Arc::new(|args| {
-            if args.len() < 2 {
-                Value::Error(String::from("max requires at least two arguments"))
-            } else {
-                let mut max: f64 = 0.0;
-                for arg in args {
-                    match arg {
-                        Value::BigInt(i) => {
-                            if *i as f64 > max {
-                                max = *i as f64;
-                            }
-                        }
-                        Value::Int(i) => {
-                            if *i as f64 > max {
-                                max = *i as f64;
-                            }
-                        }
-                        Value::Float(f) => {
-                            if *f > max {
-                                max = *f;
-                            }
-                        }
-                        Value::LFloat(f) => {
-                            if *f as f64 > max {
-                                max = *f as f64;
-                            }
-                        }
-                        _ => {
-                            return Value::Error(format!(
-                                "{} is not a numeric type",
-                                value_to_readable(arg)
-                            ))
-                        }
-                    }
-                }
-                Value::Float(max)
-            }
-        })),
-    ));
-
-    natives.push((
-        String::from("min"),
-        Function::Native(Arc::new(|args| {
-            if args.len() < 2 {
-                Value::Error(String::from("min requires at least two arguments"))
-            } else {
-                let mut min: f64 = 0.0;
-                for arg in args {
-                    match arg {
-                        Value::BigInt(i) => {
-                            if (*i as f64) < min {
-                                min = *i as f64;
-                            }
-                        }
-                        Value::Int(i) => {
-                            if (*i as f64) < min {
-                                min = *i as f64;
-                            }
-                        }
-                        Value::Float(f) => {
-                            if *f < min {
-                                min = *f;
-                            }
-                        }
-                        Value::LFloat(f) => {
-                            if (*f as f64) < min {
-                                min = *f as f64;
-                            }
-                        }
-                        _ => {
-                            return Value::Error(format!(
-                                "{} is not a numeric type",
-                                value_to_readable(arg)
-                            ))
-                        }
-                    }
-                }
-                Value::Float(min)
-            }
-        })),
-    ));
-
-    natives.push((
-        String::from("t_getelem"), // tuple get element
+        String::from("tuple.get"), // tuple get element
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("t_getelem requires exactly two arguments"));
+                return Value::Error(String::from("tuple.get requires exactly two arguments"));
             }
 
             if let Value::PtrWrapper(ptr) = &args[0] {
@@ -1388,16 +960,16 @@ pub fn get_natives() -> Vec<(String, Function)> {
             }
 
             Value::Error(String::from(
-                "t_getelem takes a pointer and an integer as parameters",
+                "tuple.get takes a pointer and an integer as parameters",
             ))
         })),
     ));
 
     natives.push((
-        String::from("http_get"),
+        String::from("http.get"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("http_get requires exactly one argument"))
+                Value::Error(String::from("http.get requires exactly one argument"))
             } else {
                 let url = value_to_string(&args[0]);
                 let body = reqwest::blocking::get(&url)
@@ -1409,10 +981,10 @@ pub fn get_natives() -> Vec<(String, Function)> {
     ));
 
     natives.push((
-        String::from("http_post"),
+        String::from("http.post"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                Value::Error(String::from("http_post requires exactly two arguments"))
+                Value::Error(String::from("http.post requires exactly two arguments"))
             } else {
                 let url = value_to_string(&args[0]);
                 let data = value_to_string(&args[1]);
@@ -1429,10 +1001,10 @@ pub fn get_natives() -> Vec<(String, Function)> {
     ));
 
     natives.push((
-        String::from("http_put"),
+        String::from("http.put"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                Value::Error(String::from("http_put requires exactly two arguments"))
+                Value::Error(String::from("http.put requires exactly two arguments"))
             } else {
                 let url = value_to_string(&args[0]);
                 let data = value_to_string(&args[1]);
@@ -1449,10 +1021,10 @@ pub fn get_natives() -> Vec<(String, Function)> {
     ));
 
     natives.push((
-        String::from("http_delete"),
+        String::from("http.delete"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                Value::Error(String::from("http_delete requires exactly one argument"))
+                Value::Error(String::from("http.delete requires exactly one argument"))
             } else {
                 let url = value_to_string(&args[0]);
                 let client = reqwest::blocking::Client::new();
@@ -1476,10 +1048,10 @@ pub fn get_natives() -> Vec<(String, Function)> {
 pub fn get_math() -> Vec<(String, Function)> {
     let mut natives = vec![];
     natives.push((
-        String::from("abs"),
+        String::from("math.abs"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("abs requires exactly one argument"));
+                return Value::Error(String::from("math.abs requires exactly one argument"));
             }
 
             match &args[0] {
@@ -1487,271 +1059,271 @@ pub fn get_math() -> Vec<(String, Function)> {
                 Value::LFloat(f) => Value::LFloat(f.abs()),
                 Value::Int(i) => Value::Int(i.abs()),
                 Value::BigInt(bi) => Value::BigInt(bi.abs()),
-                _ => Value::Error(String::from("abs requires a numeric argument")),
+                _ => Value::Error(String::from("math.abs requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("sin"),
+        String::from("math.sin"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("sin requires exactly one argument"));
+                return Value::Error(String::from("math.sin requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.sin()),
                 Value::LFloat(f) => Value::LFloat(f.sin()),
-                _ => Value::Error(String::from("sin requires a numeric argument")),
+                _ => Value::Error(String::from("math.sin requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("cos"),
+        String::from("math.cos"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("cos requires exactly one argument"));
+                return Value::Error(String::from("math.cos requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.cos()),
                 Value::LFloat(f) => Value::LFloat(f.cos()),
-                _ => Value::Error(String::from("cos requires a numeric argument")),
+                _ => Value::Error(String::from("math.cos requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("tan"),
+        String::from("math.tan"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("tan requires exactly one argument"));
+                return Value::Error(String::from("math.tan requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.tan()),
                 Value::LFloat(f) => Value::LFloat(f.tan()),
-                _ => Value::Error(String::from("tan requires a numeric argument")),
+                _ => Value::Error(String::from("math.tan requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("asin"),
+        String::from("math.asin"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("asin requires exactly one argument"));
+                return Value::Error(String::from("math.asin requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.asin()),
                 Value::LFloat(f) => Value::LFloat(f.asin()),
-                _ => Value::Error(String::from("asin requires a numeric argument")),
+                _ => Value::Error(String::from("math.asin requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("acos"),
+        String::from("math.acos"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("acos requires exactly one argument"));
+                return Value::Error(String::from("math.acos requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.acos()),
                 Value::LFloat(f) => Value::LFloat(f.acos()),
-                _ => Value::Error(String::from("acos requires a numeric argument")),
+                _ => Value::Error(String::from("math.acos requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("atan"),
+        String::from("math.atan"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("atan requires exactly one argument"));
+                return Value::Error(String::from("math.atan requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.atan()),
                 Value::LFloat(f) => Value::LFloat(f.atan()),
-                _ => Value::Error(String::from("atan requires a numeric argument")),
+                _ => Value::Error(String::from("math.atan requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("sinh"),
+        String::from("math.sinh"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("sinh requires exactly one argument"));
+                return Value::Error(String::from("math.sinh requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.sinh()),
                 Value::LFloat(f) => Value::LFloat(f.sinh()),
-                _ => Value::Error(String::from("sinh requires a numeric argument")),
+                _ => Value::Error(String::from("math.sinh requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("cosh"),
+        String::from("math.cosh"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("cosh requires exactly one argument"));
+                return Value::Error(String::from("math.cosh requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.cosh()),
                 Value::LFloat(f) => Value::LFloat(f.cosh()),
-                _ => Value::Error(String::from("cosh requires a numeric argument")),
+                _ => Value::Error(String::from("math.cosh requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("tanh"),
+        String::from("math.tanh"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("tanh requires exactly one argument"));
+                return Value::Error(String::from("math.tanh requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.tanh()),
                 Value::LFloat(f) => Value::LFloat(f.tanh()),
-                _ => Value::Error(String::from("tanh requires a numeric argument")),
+                _ => Value::Error(String::from("math.tanh requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("asinh"),
+        String::from("math.asinh"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("asinh requires exactly one argument"));
+                return Value::Error(String::from("math.asinh requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.asinh()),
                 Value::LFloat(f) => Value::LFloat(f.asinh()),
-                _ => Value::Error(String::from("asinh requires a numeric argument")),
+                _ => Value::Error(String::from("math.asinh requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("acosh"),
+        String::from("math.acosh"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("acosh requires exactly one argument"));
+                return Value::Error(String::from("math.acosh requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.acosh()),
                 Value::LFloat(f) => Value::LFloat(f.acosh()),
-                _ => Value::Error(String::from("acosh requires a numeric argument")),
+                _ => Value::Error(String::from("math.acosh requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("atanh"),
+        String::from("math.atanh"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("atanh requires exactly one argument"));
+                return Value::Error(String::from("math.atanh requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.atanh()),
                 Value::LFloat(f) => Value::LFloat(f.atanh()),
-                _ => Value::Error(String::from("atanh requires a numeric argument")),
+                _ => Value::Error(String::from("math.atanh requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("atan2"),
+        String::from("math.atan2"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("atan2 requires exactly one argument"));
+                return Value::Error(String::from("math.atan2 requires exactly one argument"));
             }
 
             match (&args[0], &args[1]) {
                 (Value::Float(f), Value::Float(f2)) => Value::Float(f.atan2(*f2)),
                 (Value::LFloat(f), Value::LFloat(f2)) => Value::LFloat(f.atan2(*f2)),
-                _ => Value::Error(String::from("atan2 requires comparible numeric arguments")),
+                _ => Value::Error(String::from("math.atan2 requires comparible numeric arguments")),
             }
         })),
     ));
 
     natives.push((
-        String::from("exp"),
+        String::from("math.exp"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("exp requires exactly one argument"));
+                return Value::Error(String::from("math.exp requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.exp()),
                 Value::LFloat(f) => Value::LFloat(f.exp()),
-                _ => Value::Error(String::from("exp requires a numeric argument")),
+                _ => Value::Error(String::from("math.exp requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("log"),
+        String::from("math.log"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("log requires exactly two arguments"));
+                return Value::Error(String::from("math.log requires exactly two arguments"));
             }
 
             match (&args[0], &args[1]) {
                 (Value::Float(x), Value::Float(base)) => Value::Float(x.log(*base)),
                 (Value::LFloat(x), Value::LFloat(base)) => Value::LFloat(x.log(*base)),
-                _ => Value::Error(String::from("log requires numeric arguments")),
+                _ => Value::Error(String::from("math.log requires numeric arguments")),
             }
         })),
     ));
 
     natives.push((
-        String::from("sqrt"),
+        String::from("math.sqrt"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("sqrt requires exactly one argument"));
+                return Value::Error(String::from("math.sqrt requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.sqrt()),
                 Value::LFloat(f) => Value::LFloat(f.sqrt()),
-                _ => Value::Error(String::from("sqrt requires a numeric argument")),
+                _ => Value::Error(String::from("math.sqrt requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("floor"),
+        String::from("math.floor"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("floor requires exactly one argument"));
+                return Value::Error(String::from("math.floor requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.floor()),
                 Value::LFloat(f) => Value::LFloat(f.floor()),
-                _ => Value::Error(String::from("floor requires a numeric argument")),
+                _ => Value::Error(String::from("math.floor requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("platform"),
+        String::from("sys.platform"),
         Function::Native(Arc::new(|args| {
             if args.len() != 0 {
-                return Value::Error(String::from("cplatform requires exactly zero arguments"));
+                return Value::Error(String::from("sys.platform requires exactly zero arguments"));
             }
 
             return Value::String(std::env::consts::OS.to_string());
@@ -1759,85 +1331,85 @@ pub fn get_math() -> Vec<(String, Function)> {
     ));
 
     natives.push((
-        String::from("ceil"),
+        String::from("math.ceil"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("ceil requires exactly one argument"));
+                return Value::Error(String::from("math.ceil requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.ceil()),
                 Value::LFloat(f) => Value::LFloat(f.ceil()),
-                _ => Value::Error(String::from("ceil requires a numeric argument")),
+                _ => Value::Error(String::from("math.ceil requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("round"),
+        String::from("math.round"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("round requires exactly one argument"));
+                return Value::Error(String::from("math.round requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.round()),
                 Value::LFloat(f) => Value::LFloat(f.round()),
-                _ => Value::Error(String::from("round requires a numeric argument")),
+                _ => Value::Error(String::from("math.round requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("trunc"),
+        String::from("math.trunc"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("trunc requires exactly one argument"));
+                return Value::Error(String::from("math.trunc requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.trunc()),
                 Value::LFloat(f) => Value::LFloat(f.trunc()),
-                _ => Value::Error(String::from("trunc requires a numeric argument")),
+                _ => Value::Error(String::from("math.trunc requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("pow"),
+        String::from("math.pow"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("pow requires exactly two arguments"));
+                return Value::Error(String::from("math.pow requires exactly two arguments"));
             }
 
             match (&args[0], &args[1]) {
                 (Value::Float(x), Value::Float(y)) => Value::Float(x.powf(*y)),
                 (Value::LFloat(x), Value::LFloat(y)) => Value::LFloat(x.powf(*y)),
-                _ => Value::Error(String::from("pow requires numeric arguments")),
+                _ => Value::Error(String::from("math.pow requires numeric arguments")),
             }
         })),
     ));
 
     natives.push((
-        String::from("exp"),
+        String::from("math.exp"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("exp requires exactly one argument"));
+                return Value::Error(String::from("math.exp requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.exp()),
                 Value::LFloat(f) => Value::LFloat(f.exp()),
-                _ => Value::Error(String::from("exp requires a numeric argument")),
+                _ => Value::Error(String::from("math.exp requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("ln"),
+        String::from("math.ln"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("ln requires exactly one argument"));
+                return Value::Error(String::from("math.ln requires exactly one argument"));
             }
 
             match &args[0] {
@@ -1845,26 +1417,26 @@ pub fn get_math() -> Vec<(String, Function)> {
                     if *f > 0.0 {
                         Value::Float(f.ln())
                     } else {
-                        Value::Error(String::from("ln requires a positive numeric argument"))
+                        Value::Error(String::from("math.ln requires a positive numeric argument"))
                     }
                 }
                 Value::LFloat(f) => {
                     if *f > 0.0 {
                         Value::LFloat(f.ln())
                     } else {
-                        Value::Error(String::from("ln requires a positive numeric argument"))
+                        Value::Error(String::from("math.ln requires a positive numeric argument"))
                     }
                 }
-                _ => Value::Error(String::from("ln requires a numeric argument")),
+                _ => Value::Error(String::from("math.ln requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("log10"),
+        String::from("math.log10"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("log10 requires exactly one argument"));
+                return Value::Error(String::from("math.log10 requires exactly one argument"));
             }
 
             match &args[0] {
@@ -1872,26 +1444,26 @@ pub fn get_math() -> Vec<(String, Function)> {
                     if *f > 0.0 {
                         Value::Float(f.log10())
                     } else {
-                        Value::Error(String::from("log10 requires a positive numeric argument"))
+                        Value::Error(String::from("math.log10 requires a positive numeric argument"))
                     }
                 }
                 Value::LFloat(f) => {
                     if *f > 0.0 {
                         Value::LFloat(f.log10())
                     } else {
-                        Value::Error(String::from("log10 requires a positive numeric argument"))
+                        Value::Error(String::from("math.log10 requires a positive numeric argument"))
                     }
                 }
-                _ => Value::Error(String::from("log10 requires a numeric argument")),
+                _ => Value::Error(String::from("math.log10 requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("log2"),
+        String::from("math.log2"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("log2 requires exactly one argument"));
+                return Value::Error(String::from("math.log2 requires exactly one argument"));
             }
 
             match &args[0] {
@@ -1899,26 +1471,26 @@ pub fn get_math() -> Vec<(String, Function)> {
                     if *f > 0.0 {
                         Value::Float(f.log10())
                     } else {
-                        Value::Error(String::from("log2 requires a positive numeric argument"))
+                        Value::Error(String::from("math.log2 requires a positive numeric argument"))
                     }
                 }
                 Value::LFloat(f) => {
                     if *f > 0.0 {
                         Value::LFloat(f.log2())
                     } else {
-                        Value::Error(String::from("log2 requires a positive numeric argument"))
+                        Value::Error(String::from("math.log2 requires a positive numeric argument"))
                     }
                 }
-                _ => Value::Error(String::from("log2 requires a numeric argument")),
+                _ => Value::Error(String::from("math.log2 requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("pow"),
+        String::from("math.pow"),
         Function::Native(Arc::new(|args| {
             if args.len() != 2 {
-                return Value::Error(String::from("pow requires exactly two arguments"));
+                return Value::Error(String::from("math.pow requires exactly two arguments"));
             }
 
             match (&args[0], &args[1]) {
@@ -1932,31 +1504,31 @@ pub fn get_math() -> Vec<(String, Function)> {
                 (Value::LFloat(base), Value::LFloat(exponent)) => {
                     Value::Float((*base as f64).powf(*exponent as f64))
                 }
-                _ => Value::Error(String::from("pow requires numeric arguments")),
+                _ => Value::Error(String::from("math.pow requires numeric arguments")),
             }
         })),
     ));
 
     natives.push((
-        String::from("round"),
+        String::from("math.round"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("round requires exactly one argument"));
+                return Value::Error(String::from("math.round requires exactly one argument"));
             }
 
             match &args[0] {
                 Value::Float(f) => Value::Float(f.round()),
                 Value::LFloat(f) => Value::LFloat(f.round()),
-                _ => Value::Error(String::from("round requires a numeric argument")),
+                _ => Value::Error(String::from("math.round requires a numeric argument")),
             }
         })),
     ));
 
     natives.push((
-        String::from("factorial"),
+        String::from("math.factorial"),
         Function::Native(Arc::new(|args| {
             if args.len() != 1 {
-                return Value::Error(String::from("factorial requires exactly one argument"));
+                return Value::Error(String::from("math.factorial requires exactly one argument"));
             }
 
             match &args[0] {
@@ -1964,7 +1536,7 @@ pub fn get_math() -> Vec<(String, Function)> {
                 Value::LFloat(f) => Value::LFloat(factorial(*f)),
                 Value::BigInt(i) => Value::BigInt(factorial(*i)),
                 Value::Int(i) => Value::Int(factorial(*i)),
-                _ => Value::Error(String::from("round requires a numeric argument")),
+                _ => Value::Error(String::from("math.factorial requires a numeric argument")),
             }
         })),
     ));

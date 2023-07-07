@@ -1,1 +1,31 @@
-let myvar: i32 = 5 * 5;
+let myvar: i32 = 9 + 5 * 5;
+
+fmt.println(myvar);
+
+let myvar2: string = "Hello, world!";
+
+fmt.print(myvar2);
+fmt.print("\n");
+
+let to_string: string = string.from(5 + 9);
+
+fmt.println(to_string);
+
+fun sum_all(...args): i32 {
+    let result: i32 = 0;
+    for arg in args {
+        if typeof arg != "i32" {
+            throw concat("Expected all arguments to be of type i32, got ", typeof arg, " instead");
+        }
+        let arg_as_int = any.force_typecast_to(typeof i32, arg);
+        result += arg_as_int;
+    }
+}
+
+fun max(num1: i32, num2: i32): i32 {
+    if num1 > num2 {
+        return num1;
+    } else {
+        return num2;
+    }
+}
