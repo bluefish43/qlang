@@ -102,9 +102,3 @@ ret
 ```
 
 effectively expanding the function's instructions.
-
-## The Qo Programming Language
-
-Qo is a simple programming language for the QVM that i'm currently making. Here is a screenshot of a file containing Qo code in VSCode (note that not every syntax in the file is currently valid):
-
-![alt Source code](./img/screenshoot_highlight.png)

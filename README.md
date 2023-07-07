@@ -24,6 +24,12 @@ For example, to run a program named `program.q`, you could run the command:
 
 qvm run -i /path/to/program.q
 
+## The Qo Programming Language
+
+Qo is a simple programming language for the QVM that i'm currently making. Here is a screenshot of a file containing Qo code in VSCode (note that not every syntax in the file is currently valid):
+
+![alt Source code](./img/screenshoot_highlight.png)
+
 ## Documentation 📚
 
 You can find detailed documentation for the Q Virtual Machine, including a description of its instruction set and usage examples, in the [docs](./DOCS.md) directory.
