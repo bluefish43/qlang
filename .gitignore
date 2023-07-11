@@ -18,3 +18,10 @@ Cargo.lock
 
 # Ignored files (where i have ideas)
 *.ignored
+
+*asm
+
+rectlib/
+.vscode/
+
+*.qobox

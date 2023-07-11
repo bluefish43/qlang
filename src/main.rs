@@ -6,9 +6,7 @@ use binary::asmparser::Parser;
 use binary::asmtokens::tokenize;
 use qo::parser::Parser as QOParser;
 use qo::tokenizer::Tokenizer;
-use qo::tokens::Token as QOToken;
-use qo::tokens::TokenKind as QOTokenKind;
-use vm::{VirtualMachine};
+use vm::VirtualMachine;
 use ansi_term::Color;
 
 use crate::qo::converter::convert;
@@ -16,7 +14,6 @@ use crate::qo::parser::format_error;
 use crate::vm::{Instruction, Value};
 
 pub mod class;
-pub mod external;
 pub mod function;
 pub mod gcwrapper;
 pub mod vm;
@@ -25,33 +22,43 @@ pub mod memory;
 pub mod manifest;
 pub mod qo;
 
-use core::panic;
-use std::collections::VecDeque;
+use std::panic;
 use std::env::args;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::exit;
-use std::sync::Arc;
 use std::time::Instant;
 
+static mut FORMAT_ERR_SOURCE_FILE: String = String::new();
+
+#[macro_export]
 macro_rules! error_println {
     ($($args:expr),*) => {
-        println!("{} {}", Color::Red.bold().paint("Error:"), format_args!($($args),*))
+        eprintln!("{} {}", Color::Red.bold().paint("Error:"), format_args!($($args),*))
     };
 }
 
+#[macro_export]
 macro_rules! note_println {
     ($($args:expr),*) => {
-        println!("{} {}", Color::White.bold().paint("Note:"), format_args!($($args),*))
+        eprintln!("{} {}", Color::White.bold().paint("Note:"), format_args!($($args),*))
     };
 }
 
+#[macro_export]
 macro_rules! example_println {
     ($($args:expr),*) => {
         let input = format!($($args),*);
         let lines: Vec<String> = input.lines().map(|line| format!("+ {}", ansi_term::Color::Green.paint(line))).collect();
         let output = lines.join("\n");
-        println!("{}", output);
+        eprintln!("{}", output);
+    };
+}
+
+#[macro_export]
+macro_rules! warning_println {
+    ($($args:expr),*) => {
+        eprintln!("{} {}", ansi_term::Color::Yellow.bold().paint("Warning:"), format_args!($($args),*))
     };
 }
 
@@ -145,6 +152,20 @@ pub fn main() {
                     option = arg;
                 }
                 "build" => {
+                    if option != String::new() {
+                        error_println!("The main option can only be used once");
+                        exit(1)
+                    }
+                    option = arg;
+                }
+                "analyze-qo-context" => {
+                    if option != String::new() {
+                        error_println!("The main option can only be used once");
+                        exit(1)
+                    }
+                    option = arg;
+                }
+                "qo-build" => {
                     if option != String::new() {
                         error_println!("The main option can only be used once");
                         exit(1)
@@ -336,67 +357,166 @@ pub fn main() {
             error_println!("Could not create output file: {}", err);
             exit(1);
         }
-    } else if option == String::from("qotest") {
-        eprintln!("getting here");
-        let mut file = File::open(input).unwrap();
-        let mut buffer = String::new();
-        file.read_to_string(&mut buffer).unwrap();
-        let mut tokenizer = Tokenizer::new(buffer.clone());
-        let tokens: Vec<QOToken> = tokenizer.tokenize().unwrap();
-        eprintln!("{:?}", tokens);
-        let mut parser = QOParser::new(&tokens);
-        let parsed = parser.parse();
-        if let Err((msg, tok)) = parsed {
-            if let Some(token) = tok {
-                let fmt = format_error(&buffer, Color::White.bold().paint(&msg[0]).to_string().as_str(), token);
-                error_println!("{}", fmt);
-                if msg.len() > 1 {
-                    note_println!("{}", msg[1]);
-                }
-                if msg.len() >= 2 {
-                    example_println!("{}", msg[2]);
-                }
-            } else {
-                error_println!("{}", msg[0]);
-                if msg.len() > 1 {
-                    note_println!("{}", msg[1]);
-                }
-                if msg.len() >= 2 {
-                    example_println!("{}", msg[2]);
+    } else if option == String::from("analyze-qo-context") {
+        let file = File::open(&input);
+        match file {
+            Ok(mut file) => {
+                let mut buffer = String::new();
+                let res = file.read_to_string(&mut buffer);
+                match res {
+                    Ok(_) => {
+                        unsafe {
+                            FORMAT_ERR_SOURCE_FILE = buffer.clone();
+                        }
+                        let mut tokenizer = Tokenizer::new(buffer.clone());
+                        let tokens = tokenizer.tokenize();
+                        match tokens {
+                            Ok(tokens) => {
+                                let mut parser = QOParser::new(&tokens);
+                                let parsed = parser.parse(None);
+                                if let Err((msg, tok)) = parsed {
+                                    if let Some(token) = tok {
+                                        let fmt = format_error(unsafe { &FORMAT_ERR_SOURCE_FILE }, Color::White.bold().paint(&msg[0]).to_string().as_str(), token.clone());
+                                        error_println!("{}", fmt);
+                                        if msg.len() > 1 {
+                                            note_println!("{}", msg[1]);
+                                        }
+                                        if msg.len() >= 2 {
+                                            example_println!("{}", msg[2]);
+                                        }
+                                        eprintln!("{}:{}:{}", &token.line, &token.col, &token.length);
+                                        exit(1)
+                                    } else {
+                                        error_println!("{}", msg[0]);
+                                        if msg.len() > 1 {
+                                            note_println!("{}", msg[1]);
+                                        }
+                                        if msg.len() >= 2 {
+                                            example_println!("{}", msg[2]);
+                                        }
+                                        eprintln!("1:1:1");
+                                        exit(1)
+                                    }
+                                } else if let Ok(_) = parsed {
+                                    exit(0)
+                                }
+                            }
+                            Err(err) => {
+                                error_println!("{}", err);
+                                exit(1)
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        error_println!("Could not read from file: {}", err);
+                        exit(1)
+                    }
                 }
             }
-            exit(1)
-        } else if let Ok(parsed) = parsed {
-            eprintln!("{:?}", parsed);
-            let converted = convert(parsed);
-            eprintln!("Converted:\n{}", converted);
+            Err(err) => {
+                error_println!("Could not open file: {}", err);
+                exit(1)
+            }
+        }
+    } else if option == String::from("qo-build") {
+        let file = File::open(&input);
+        match file {
+            Ok(mut file) => {
+                let mut buffer = String::new();
+                let res = file.read_to_string(&mut buffer);
+                match res {
+                    Ok(_) => {
+                        unsafe {
+                            FORMAT_ERR_SOURCE_FILE = buffer.clone();
+                        }
+                        let mut tokenizer = Tokenizer::new(buffer.clone());
+                        let tokens = tokenizer.tokenize();
+                        match tokens {
+                            Ok(tokens) => {
+                                let mut parser = QOParser::new(&tokens);
+                                let parsed = parser.parse(None);
+                                if let Err((msg, tok)) = parsed {
+                                    if let Some(token) = tok {
+                                        let fmt = format_error(unsafe { &FORMAT_ERR_SOURCE_FILE }, Color::White.bold().paint(&msg[0]).to_string().as_str(), token.clone());
+                                        error_println!("{}", fmt);
+                                        if msg.len() > 1 {
+                                            note_println!("{}", msg[1]);
+                                        }
+                                        if msg.len() >= 2 {
+                                            example_println!("{}", msg[2]);
+                                        }
+                                        eprintln!("{}:{}:{}", &token.line, &token.col, &token.length);
+                                        exit(1)
+                                    } else {
+                                        error_println!("{}", msg[0]);
+                                        if msg.len() > 1 {
+                                            note_println!("{}", msg[1]);
+                                        }
+                                        if msg.len() >= 2 {
+                                            example_println!("{}", msg[2]);
+                                        }
+                                        eprintln!("1:1:1");
+                                        exit(1)
+                                    }
+                                } else if let Ok(result) = parsed {
+                                    let converted = convert(result);
+                                    if &output == "" {
+                                        error_println!("Output file not specified");
+                                        exit(1)
+                                    }
+                                    let out_file = File::create(output);
+                                    match out_file {
+                                        Ok(mut file) => {
+                                            let tokens = tokenize(&converted, &input);
+                                            if let Err(err) = tokens {
+                                                println!("{}:{}", input, err);
+                                                exit(1);
+                                            }
+                                            let tokens = tokens.unwrap();
+                                            let mut parser = Parser::new(tokens);
+                                            let instructions = parser.parse();
+                                            if let Err(err) = instructions {
+                                                println!("{}:{}", input, err);
+                                                exit(1);
+                                            }
+                                            let instructions = instructions.unwrap();
+                                            let res = write_instructions(&mut file, instructions);
+                                            match res {
+                                                Ok(_) => {
+                                                    exit(0)
+                                                }
+                                                Err(err) => {
+                                                    error_println!("Could not write instructions to file: {}", err);
+                                                    exit(1)
+                                                }
+                                            }
+                                        }
+                                        Err(err) => {
+                                            error_println!("Could not create output file: {}", err);
+                                            exit(1)
+                                        }
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                error_println!("{}", err);
+                                exit(1)
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        error_println!("Could not read from file: {}", err);
+                        exit(1)
+                    }
+                }
+            }
+            Err(err) => {
+                error_println!("Could not open file: {}", err);
+                exit(1)
+            }
         }
     } else {
-        eprintln!("Unknown option: {}", option);
+        error_println!("Unknown option: {}", option);
         exit(1)
-    }
-}
-
-fn factorize(number: i32) -> Vec<i32> {
-    let mut factors = vec![];
-    let mut current = number;
-    let mut i = 0;
-    loop {
-        if current == 1 {
-            return factors;
-        }
-        if (current as f64 / i as f64).fract() == 0.0 {
-            factors.push(i);
-            current /= i;
-            i = 2;
-        } else {
-            i += 1;
-            if i as f64 > (number as f64 / 2.0) {
-                factors.push(current);
-                return factors;
-            } else {
-                continue;
-            }
-        }
     }
 }

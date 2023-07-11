@@ -2,6 +2,8 @@ use std::io::Read;
 
 use fxhash::FxHashMap;
 
+use crate::warning_println;
+
 use super::{tokens::{Token, TokenKind}, tokenizer::Tokenizer};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -10,6 +12,8 @@ pub enum Statement {
     Assignment(String, Expression),
     Conditional(Condition, Vec<Statement>),
     Expr(Expression),
+    FunctionDefinition(String, Option<Vec<(String, Vec<QoTypes>)>>, QoTypes, Vec<Statement>),
+    Return(Expression),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -65,6 +69,19 @@ pub enum QoTypes {
     None,
 }
 
+fn is_snake_case(string: &str) -> bool {
+    if !string.is_ascii() || !string.chars().all(|c| c.is_lowercase() || c.is_digit(10) || c == '_') {
+        return false;
+    }
+
+    let mut chars = string.chars();
+    if chars.next() == Some('_') || chars.last() == Some('_') {
+        return false;
+    }
+
+    !string.contains("__")
+}
+
 #[derive(Clone, Debug)]
 pub struct Parser {
     statements: Vec<Statement>,
@@ -83,7 +100,7 @@ impl Parser {
         }
     }
 
-    pub fn parse(&mut self) -> Result<Vec<Statement>, (Vec<String>, Option<Token>)> {
+    pub fn parse(&mut self, expected_type: Option<QoTypes>) -> Result<Vec<Statement>, (Vec<String>, Option<Token>)> {
         let functions = super::function_data::return_function_data();
         self.function_types_map.extend(functions.into_iter());
 
@@ -96,6 +113,9 @@ impl Parser {
                             match k.as_str() {
                                 "let" => {
                                     let name = self.parse_identifier()?;
+                                    if !is_snake_case(&name) {
+                                        warning_println!("Non snake-case variable name `{}`", name);
+                                    }
                                     let variable_type = self.parse_annotation()?;
                                     self.variable_types_map.insert(name.clone(), variable_type);
                                     self.expect_kind(TokenKind::Equals)?;
@@ -120,9 +140,22 @@ impl Parser {
                                                                 let tokens = tokenizerr.tokenize();
                                                                 if let Ok(tokens) = tokens {
                                                                     let mut parser = Parser::new(&tokens);
-                                                                    let statements = parser.parse()?;
-                                                                    self.statements.extend(statements);
+                                                                    let statements = parser.parse(None);
+                                                                    match statements {
+                                                                        Err(err) => {
+                                                                            unsafe {
+                                                                                crate::FORMAT_ERR_SOURCE_FILE = buf.clone();
+                                                                                return Err(err);
+                                                                            }
+                                                                        }
+                                                                        Ok(statements) => {
+                                                                            self.statements.extend(statements);
+                                                                        }
+                                                                    }
                                                                 } else if let Err(err) = tokens {
+                                                                    unsafe {
+                                                                        crate::FORMAT_ERR_SOURCE_FILE = buf.clone();
+                                                                    }
                                                                     return Err((vec![err], tok))
                                                                 }
                                                             }
@@ -144,6 +177,38 @@ impl Parser {
                                             return Err((vec![format!("Unexpected EOF")], Some(token)))
                                         }
                                     }
+                                }
+                                "fun" => {
+                                    let name = self.parse_identifier()?;
+                                    let signature_args = self.parse_function_arguments_definition()?;
+                                    self.function_types_map.insert(name.clone(), signature_args.clone());
+                                    let block = self.get_block_parsed(Some(signature_args.1), signature_args.0.clone().unwrap_or(vec![(String::from("args"), vec![QoTypes::List])]))?;
+                                    self.statements.push(Statement::FunctionDefinition(name, signature_args.0, signature_args.1, block));
+                                }
+                                "return" => {
+                                    if let Some(Token { kind: TokenKind::Semicolon, .. }) = self.iter.peek() {
+                                        if let Some(QoTypes::None) = expected_type {
+                                            self.iter.next();
+                                            let expr = Expression::Literal(TokenKind::NoneLiteral);
+                                            self.statements.push(Statement::Return(expr));
+                                            continue;
+                                        } else if let None = expected_type {
+                                            self.iter.next();
+                                            let expr = Expression::Literal(TokenKind::NoneLiteral);
+                                            self.statements.push(Statement::Return(expr));
+                                            continue;
+                                        } else {
+                                            return Err((
+                                                vec![
+                                                    format!("Cannot return None as the expected return type is marked as `{:?}`", expected_type.unwrap())
+                                                ],
+                                                self.iter.next()
+                                            ))
+                                        }
+                                    }
+                                    let expr = self.evaluate_expected(expected_type, false)?;
+                                    self.expect_kind(TokenKind::Semicolon)?;
+                                    self.statements.push(Statement::Return(expr));
                                 }
                                 _ => {
                                     panic!("Exhaustive handling of keywords in Parser.parse: {}", k)
@@ -208,6 +273,11 @@ impl Parser {
             }
         }
         Ok(self.statements.clone())
+    }
+
+    pub fn extend_with(&mut self, other_parser: &Parser) {
+        self.variable_types_map.extend(other_parser.variable_types_map.clone().into_iter());
+        self.function_types_map.extend(other_parser.function_types_map.clone().into_iter());
     }
 
     pub fn typecheck(&self, expression: &Expression, type_: &[QoTypes]) -> Result<(), String> {
@@ -281,6 +351,61 @@ impl Parser {
         }
     }
 
+    pub fn get_block(&mut self) -> Result<Vec<Token>, (Vec<String>, Option<Token>)> {
+        let mut key_count = 1;
+        let mut tokens = Vec::new();
+        let mut last_token = None;
+        self.expect_kind(TokenKind::LeftKey)?;
+        loop {
+            if let Some(token) = self.iter.next() {
+                match &token.kind {
+                    TokenKind::LeftKey => {
+                        tokens.push(token.clone());
+                        last_token = Some(token);
+                        key_count += 1;
+                    }
+                    TokenKind::RightKey => {
+                        last_token = Some(token.clone());
+                        key_count -= 1;
+                        if key_count == 0 {
+                            break;
+                        } else if key_count < 0 {
+                            tokens.push(token.clone());
+                            return Err((vec![
+                                format!("Key (block-definition marker) not aligned was detected (remove the extra `}}`")
+                            ],
+                        Some(token)))
+                        } else {
+                            tokens.push(token.clone());
+                            continue;
+                        }
+                    }
+                    _ => {
+                        last_token = Some(token.clone());
+                        tokens.push(token);
+                    }
+                }
+            } else {
+                return Err((vec![
+                    format!("Unclosed code block")
+                ],
+            last_token))
+            }
+        }
+        Ok(tokens)
+    }
+
+    pub fn get_block_parsed(&mut self, expected: Option<QoTypes>, args: Vec<(String, Vec<QoTypes>)>) -> Result<Vec<Statement>, (Vec<String>, Option<Token>)> {
+        let toks = self.get_block()?;
+        let mut parser = Parser::new(&toks);
+        parser.extend_with(self);
+        for (name, type_) in args {
+            parser.variable_types_map.insert(name, type_[0]);
+        }
+        let result = parser.parse(expected)?;
+        return Ok(result)
+    }
+
     pub fn parse_identifier(&mut self) -> Result<String, (Vec<String>, Option<Token>)> {
         match self.iter.next() {
             Some(token) => {
@@ -289,7 +414,7 @@ impl Parser {
                         return Ok(i.to_string())
                     }
                     _ => {
-                        return Err((vec![format!("Expected an identifier here, found: {:?}", &token)], Some(token)))
+                        return Err((vec![format!("Expected an identifier here, found: `{:?}`", &token.kind)], Some(token)))
                     }
                 }
             }
@@ -315,6 +440,17 @@ impl Parser {
         }
     }
 
+    pub fn expect_kind_peeked(&mut self, kind: TokenKind) -> bool {
+        match self.iter.next() {
+            Some(token) => {
+                &token.kind != &kind
+            }
+            None => {
+                false
+            }
+        }
+    }
+
     pub fn expect_kind_returned(&mut self, kind: TokenKind) -> Result<TokenKind, (Vec<String>, Option<Token>)> {
         match self.iter.next() {
             Some(token) => {
@@ -330,9 +466,35 @@ impl Parser {
         }
     }
 
+    pub fn parse_function_arguments_definition(&mut self) -> Result<(Option<Vec<(String, Vec<QoTypes>)>>, QoTypes), (Vec<String>, Option<Token>)> {
+        self.expect_kind(TokenKind::LeftParen)?;
+    
+        let mut args: Vec<(String, Vec<QoTypes>)> = Vec::new();
+        loop {
+            if let Some(Token { kind: TokenKind::RightParen, .. }) = self.iter.peek() {
+                self.iter.next();
+                break;
+            }
+
+            let name = self.parse_identifier()?;
+            let annotation = self.parse_annotation()?;
+            args.push((name, vec![annotation]));
+
+            if let Some(Token { kind: TokenKind::RightParen, .. }) = self.iter.peek() {
+                self.iter.next();
+                break;
+            } else {
+                self.expect_kind(TokenKind::Comma)?;
+            }
+        }
+
+        let returns = self.parse_annotation()?;
+        Ok((Some(args), returns))
+    }
+
     pub fn evaluate_expected(&mut self, expected: Option<QoTypes>, fun_should_skip: bool) -> Result<Expression, (Vec<String>, Option<Token>)> {
         let peeked = self.iter.next();
-        eprintln!("ran evaluate_expected");
+        
         match peeked {
             Some(token) => {
                 match &token.kind {
@@ -346,11 +508,11 @@ impl Parser {
                         tokens.insert(0, token.clone());
                         let expr = self.parse_math_expression(tokens);
                         match expr {
-                            Some(expr) => {
+                            Ok(expr) => {
                                 Ok(Expression::Numerical(expr))
                             }
-                            None => {
-                                return Err((vec![format!("Error during math expression parsing")], Some(token)))
+                            Err(err) => {
+                                return Err((vec![format!("Error during math expression parsing: `{}`", err)], Some(token)))
                             }
                         }
                     }
@@ -372,11 +534,11 @@ impl Parser {
                         tokens.insert(0, token.clone());
                         let expr = self.parse_math_expression(tokens);
                         match expr {
-                            Some(expr) => {
+                            Ok(expr) => {
                                 Ok(Expression::Numerical(expr))
                             }
-                            None => {
-                                return Err((vec![format!("Error during math expression parsing")], Some(token)))
+                            Err(err) => {
+                                return Err((vec![format!("Error during math expression parsing: `{}`", err)], Some(token)))
                             }
                         }
                     }
@@ -398,12 +560,10 @@ impl Parser {
                     }
                     TokenKind::Identifier(i) => {
                         if self.variable_types_map.contains_key(i) {
-                            eprintln!("Somehow got here");
-                            eprintln!("Current statements: {:?}", self.statements);
                             let type_ = self.variable_types_map.get(i).unwrap().clone();
                             if let Some(expected) = expected {
                                 if type_ != expected {
-                                    return Err((vec![format!("The variable `{}` has a type of {:?} that is not assigneable to a variable of type {:?}",
+                                    return Err((vec![format!("The variable `{}` has a type of {:?} that is not compatible with the type {:?} that is expected to be returned",
                                     i, type_, expected)], Some(token)));
                                 } else {
                                     Ok(Expression::Variable(i.clone()))
@@ -412,7 +572,7 @@ impl Parser {
                                 Ok(Expression::Variable(i.clone()))
                             }
                         } else if self.function_types_map.contains_key(i) {
-                            eprintln!("function parser attempt");
+                            
                             let types = self.function_types_map.get(i).unwrap().clone();
                             if let Some(expected) = expected {
                                 if expected != types.1 {
@@ -430,14 +590,14 @@ impl Parser {
                             }
                             Ok(Expression::FunctionCall(i.clone(), args))
                         } else {
-                            return Err((vec![format!("Unexpected token `{:?}`", &token.kind)], Some(token)))
+                            return Err((vec![format!("Use of unbound identifier `{:?}`", &token.kind)], Some(token)))
                         }
                     }
                     TokenKind::LeftBrac => { // If the token is a left bracket, it starts a list
                         // Create an empty vector to store the list elements
                         let mut list_elements: Vec<Expression> = Vec::new();
         
-                        eprintln!("overflow is here!");
+                        
 
                         // Loop until we find a right bracket or an error
                         loop {
@@ -554,7 +714,7 @@ impl Parser {
                 self.iter.next();
                 break;
             }
-            eprintln!("{:?}", expressions);
+            
             let expr = self.evaluate_expected(None, true)?;
             expressions.push(expr);
             if let Some(Token { kind: TokenKind::Comma, .. }) = self.iter.peek() {
@@ -590,17 +750,23 @@ impl Parser {
         tokens
     }
 
-    fn parse_math_expression(&self, tokens: Vec<Token>) -> Option<Math> {
+    fn parse_math_expression(&self, tokens: Vec<Token>) -> Result<Math, String> {
         self.parse_math_expression_helper(&tokens, 0)
     }
     
-    fn parse_math_expression_helper(&self, tokens: &[Token], precedence: u8) -> Option<Math> {
+    fn parse_math_expression_helper(&self, tokens: &[Token], precedence: u8) -> Result<Math, String> {
         let mut current_index = 0;
         let mut lhs = match tokens.get(current_index) {
             Some(Token { kind: TokenKind::NumericLiteral(num), .. }) => Math::Int(*num),
             Some(Token { kind: TokenKind::FloatLiteral(num), .. }) => Math::Float(*num),
-            Some(Token { kind: TokenKind::Identifier(i), .. }) => Math::Expr(Box::new(Expression::Variable(i.to_string()))),
-            _ => return None,
+            Some(Token { kind: TokenKind::Identifier(i), .. }) => {
+                if !self.variable_types_map.contains_key(i) {
+                    return Err(format!("Use of undefined variable `{i}`"));
+                } else {
+                    Math::Expr(Box::new(Expression::Variable(i.to_string())))
+                }
+            },
+            _ => return Err(format!("Unexpected token for a math expression `{:?}`", &tokens.get(current_index))),
         };
     
         current_index += 1;
@@ -623,27 +789,27 @@ impl Parser {
             if operator_token.kind == TokenKind::LeftParen {
                 let closing_index = self.find_matching_parenthesis(&tokens[current_index..]);
                 if closing_index.is_none() {
-                    return None;
+                    return Err(format!("Could not find matching parenthesis (at parsing a math expression)"));
                 }
     
                 let sub_expression = &tokens[(current_index + 1)..(current_index + closing_index.unwrap())];
                 let sub_result = self.parse_math_expression(sub_expression.to_vec());
     
-                if sub_result.is_none() {
-                    return None;
+                if sub_result.is_err() {
+                    return Err(sub_result.err().unwrap());
                 }
     
                 lhs = match operator_precedence {
                     1 => Math::Addition(Box::new(lhs), Box::new(sub_result.unwrap())),
                     2 => Math::Multiplication(Box::new(lhs), Box::new(sub_result.unwrap())),
-                    _ => return None,
+                    _ => return Err(format!("Invalid operator precedence value: `{operator_precedence}`")),
                 };
     
                 current_index += closing_index.unwrap() + 1;
             } else {
                 let rhs = match self.parse_math_expression_helper(&tokens[current_index..], operator_precedence) {
-                    Some(expr) => expr,
-                    None => return None,
+                    Ok(expr) => expr,
+                    Err(err) => return Err(err),
                 };
     
                 lhs = match operator_token.kind {
@@ -652,14 +818,14 @@ impl Parser {
                     TokenKind::Times => Math::Multiplication(Box::new(lhs), Box::new(rhs)),
                     TokenKind::Divided => Math::Division(Box::new(lhs), Box::new(rhs)),
                     TokenKind::Percent => Math::Remainder(Box::new(lhs), Box::new(rhs)),
-                    _ => return None,
+                    _ => return Err(format!("Invalid mathematical operator: `{:?}`", operator_token.kind)),
                 };
     
                 current_index += 1;
             }
         }
     
-        Some(lhs)
+        Ok(lhs)
     }
     
     fn find_matching_parenthesis(&self, tokens: &[Token]) -> Option<usize> {

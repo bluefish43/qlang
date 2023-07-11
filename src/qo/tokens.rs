@@ -40,6 +40,7 @@ pub enum TokenKind {
     RuleSet,
     Colon,
     Semicolon,
+    Ellipsis,
 }
 
 #[derive(Clone, Debug, PartialEq)]

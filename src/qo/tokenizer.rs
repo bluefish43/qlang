@@ -54,7 +54,7 @@ impl Tokenizer {
                                     break;
                                 }
                             }
-                            if ["let", "import"].contains(&identifier.as_str()) {
+                            if ["let", "import", "fun", "return"].contains(&identifier.as_str()) {
                                 let length = identifier.len();
                                 self.tokens.push(Token {
                                     kind: TokenKind::Keyword(identifier),
@@ -503,6 +503,22 @@ impl Tokenizer {
                             self.column += 1;
                         }
                         '.' => {
+                            if let Some(&'.') = iter.peek() {
+                                iter.next();
+                                if let Some(&'.') = iter.peek() {
+                                    iter.next();
+                                    self.tokens.push(Token {
+                                        kind: TokenKind::Ellipsis,
+                                        length: 3,
+                                        line: self.line,
+                                        col: self.column,
+                                    });
+                                    self.column += 3;
+                                    continue;
+                                } else {
+                                    return Err(format!("{}:{}: Unrecognized token '..'", self.line, self.column))
+                                }
+                            }
                             self.tokens.push(Token {
                                 kind: TokenKind::Dot,
                                 length: 1,
