@@ -54,7 +54,7 @@ impl Tokenizer {
                                     break;
                                 }
                             }
-                            if ["let", "import", "fun", "return"].contains(&identifier.as_str()) {
+                            if ["let", "import", "fun", "return", "typeof"].contains(&identifier.as_str()) {
                                 let length = identifier.len();
                                 self.tokens.push(Token {
                                     kind: TokenKind::Keyword(identifier),

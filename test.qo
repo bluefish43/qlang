@@ -1,6 +1,3 @@
-let i: i32 = 9;
+let hi: string = "Hello, world!\n";
 
-fun myfun(arg: i32): string {
-    let myint: i64 = 1 + arg;
-    return myint;
-}
+fmt.println(typeof hi);

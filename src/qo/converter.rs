@@ -5,8 +5,8 @@ fn convert_qo_types_to_types(qo_type: QoTypes) -> Types {
     match qo_type {
         QoTypes::I32 => Types::Int,
         QoTypes::I64 => Types::BigInt,
-        QoTypes::F32 => Types::Float,
-        QoTypes::F64 => Types::LFloat,
+        QoTypes::F32 => Types::LFloat,
+        QoTypes::F64 => Types::Float,
         QoTypes::String => Types::String,
         QoTypes::Char => Types::Character,
         QoTypes::Bool => Types::Boolean,
@@ -55,6 +55,9 @@ pub fn convert(statements: Vec<Statement>) -> String {
             Statement::Return(expr) => {
                 convert_expr(&mut out, expr);
                 out.push_str("ret\n");
+            }
+            Statement::StrPush(n) => {
+                out.push_str(&format!("push string {:?}", n));
             }
         }
     }

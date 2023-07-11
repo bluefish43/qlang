@@ -14,6 +14,7 @@ pub enum Statement {
     Expr(Expression),
     FunctionDefinition(String, Option<Vec<(String, Vec<QoTypes>)>>, QoTypes, Vec<Statement>),
     Return(Expression),
+    StrPush(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -67,6 +68,28 @@ pub enum QoTypes {
     Future,
     Any,
     None,
+}
+
+fn convert_qo_types_to_string<'a>(qo_type: QoTypes) -> &'a str {
+    match qo_type {
+        QoTypes::I32 => "i32",
+        QoTypes::I64 => "i64",
+        QoTypes::F32 => "f64",
+        QoTypes::F64 => "f32",
+        QoTypes::String => "string",
+        QoTypes::Char => "char",
+        QoTypes::Bool => "bool",
+        QoTypes::List => "list",
+        QoTypes::Tuple => "tuple",
+        QoTypes::Uninit => "uninit",
+        QoTypes::Error => "Error",
+        QoTypes::Pointer => "pointer",
+        QoTypes::File => "File",
+        QoTypes::Bytes => "Bytes",
+        QoTypes::Future => "Future",
+        QoTypes::Any => "any",
+        QoTypes::None => "None",
+    }
 }
 
 fn is_snake_case(string: &str) -> bool {
@@ -209,6 +232,19 @@ impl Parser {
                                     let expr = self.evaluate_expected(expected_type, false)?;
                                     self.expect_kind(TokenKind::Semicolon)?;
                                     self.statements.push(Statement::Return(expr));
+                                }
+                                "typeof" => {
+                                    let name = self.parse_identifier()?;
+                                    if let Some(type_) = self.variable_types_map.get(&name) {
+                                        self.statements.push(Statement::StrPush(String::from(convert_qo_types_to_string(type_.clone()))))
+                                    } else {
+                                        return Err((
+                                            vec![
+                                                format!("Use of unbound variable `{}`", name)
+                                            ],
+                                            self.iter.nth(0)
+                                        ))
+                                    }
                                 }
                                 _ => {
                                     panic!("Exhaustive handling of keywords in Parser.parse: {}", k)
@@ -639,6 +675,26 @@ impl Parser {
 
                         // Return the list expression
                         Ok(Expression::List(list_elements))
+                    }
+                    TokenKind::Keyword(k) => {
+                        match k.as_str() {
+                            "typeof" => {
+                                let name = self.parse_identifier()?;
+                                if let Some(type_) = self.variable_types_map.get(&name) {
+                                    return Ok(Expression::Literal(TokenKind::StringLiteral(String::from(convert_qo_types_to_string(type_.clone())))))
+                                } else {
+                                    return Err((
+                                        vec![
+                                            format!("Use of unbound variable `{}`", name)
+                                        ],
+                                        self.iter.nth(0)
+                                    ))
+                                }
+                            }
+                            _ => {
+                                return Err((vec![format!("The keyword `{}` is not valid for an expression", k)], Some(token)))
+                            }
+                        }
                     }
                     _ => {
                         return Err((vec![format!("Expected an expression, found `{:?}`", &token.kind)], Some(token)))
